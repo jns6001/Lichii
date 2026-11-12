@@ -851,6 +851,7 @@ private:
     struct UniformKeep {
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
+        std::array<u32, NUM_STAGES> prev_streamed{}; ///< Streamed by the previous draw
         /// Device ranges written since the previous draw began: inline constant data, then the
         /// CPU writes and GPU-modified marks.
         boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>

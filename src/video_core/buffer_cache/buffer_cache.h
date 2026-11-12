@@ -1701,6 +1701,7 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     }
     keep.patch = patch_on;
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
+    keep.prev_streamed = streamed;
     const bool usable = delta != nullptr && unwritten && !delta->overflowed;
     if (usable) {
         keep.writes.insert(keep.writes.end(), keep.memory_writes.begin(),
@@ -2584,7 +2585,10 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
             // EDEN_NX2_UBOREUSE=0 turns it off.
             if (VideoCommon::UniformStreamReuseEnabled()) {
-                if (uniform_keep.patch && uniform_keep.writes_complete) {
+                // `writes` covers only the time since the previous draw: the slot's bytes are
+                // current only if that draw streamed (or kept) this slot.
+                if (uniform_keep.patch && uniform_keep.writes_complete &&
+                    ((uniform_keep.prev_streamed[stage] >> index) & 1) != 0) {
                     streamed = VideoCommon::BindSmallUniformPatching(
                         runtime, device_memory, stage, index, binding_index, device_addr, size,
                         uniform_keep.writes);
