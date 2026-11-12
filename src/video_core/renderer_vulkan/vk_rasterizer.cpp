@@ -1150,7 +1150,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                        texture_cache.RenderTargetsNeedPrepare()) {
                 ++skips.sticky_skip_targets;
             } else if (state_tracker.DynamicStatePending() ||
-                       state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology) {
+                       state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology ||
+                       (device.IsExtExtendedDynamicState3BlendingSupported() &&
+                        pipeline->ColorOutputMask() != last_color_output_mask)) {
                 ++skips.sticky_skip_dynamic;
             } else if (!pipeline->StickyImagesReady()) {
                 ++skips.sticky_skip_images;
@@ -1164,7 +1166,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 UpdateOcarinaJitter();
                 if (texture_cache.FeedbackLoopActive() || outside_pass()) {
                     ++skips.sticky_skip_barrier;
-                } else if (state_tracker.DynamicStatePending()) {
+                } else if (state_tracker.DynamicStatePending() ||
+                           (device.IsExtExtendedDynamicState3BlendingSupported() &&
+                            pipeline->ColorOutputMask() != last_color_output_mask)) {
                     ++skips.sticky_skip_dynamic;
                 } else {
                     sticky = true;
@@ -3871,8 +3875,13 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     if (emulated_mesh) {
         state_tracker.InvalidateInputState();
     } else if (Settings::values.fast_draw_sticky.GetValue() && !state_tracker.DynamicStatePending() &&
-               state_tracker.Topology() == maxwell3d->draw_manager.draw_state.topology) {
+               state_tracker.Topology() == maxwell3d->draw_manager.draw_state.topology &&
+               (!device.IsExtExtendedDynamicState3BlendingSupported() ||
+                (pipeline != nullptr ? pipeline->ColorOutputMask() : ~0U) ==
+                    last_color_output_mask)) {
         // Every flag this function reads is clear and the topology is already bound.
+        // UpdateBlending re-records the colour write mask when the pipeline outputs other
+        // components, and no dirty flag marks that, so that case does not skip.
         ++fast_draw_stats.dynamic_skipped;
         return;
     }

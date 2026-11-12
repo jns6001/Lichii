@@ -673,6 +673,13 @@ struct Values {
                                                    true,
                                                    true};
 
+    // With sync_memory_operations, each synced command list drains the GPU back thread before
+    // the next list is parsed (~600 ms/s in BotW, all of it gp sync fence). On: the fence is
+    // still queued in order on the back, and the front keeps parsing lists it already copied.
+    // A list read from GPU-written or dirty memory still waits. Off by default.
+    SwitchableSetting<bool> defer_gp_sync_drain{linkage, false, "defer_gp_sync_drain",
+                                                Category::RendererAdvanced};
+
     SwitchableSetting<bool> renderer_force_max_clock{linkage, false, "force_max_clock",
                                                      Category::RendererAdvanced};
 

@@ -1166,7 +1166,10 @@ bool TextureCache<P>::RenderTargetsNeedPrepare() const noexcept {
         constexpr auto heavy = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
                                ImageFlagBits::SparseTiles | ImageFlagBits::UnwrittenSparse |
                                ImageFlagBits::Unbacked | ImageFlagBits::IsDecoding;
-        return VideoCommon::SamplingChangesImage(image) || True(image.flags & heavy);
+        // PrepareImage(is_modification) marks the target GPU-modified. A download clears that
+        // mark; a fast draw has to prepare the target again or the mark stays clear.
+        return VideoCommon::SamplingChangesImage(image) || True(image.flags & heavy) ||
+               False(image.flags & ImageFlagBits::GpuModified);
     };
     for (const ImageViewId id : render_targets.color_buffer_ids) {
         if (needs(id)) {

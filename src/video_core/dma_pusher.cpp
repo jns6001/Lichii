@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <span>
@@ -31,6 +32,34 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/rasterizer_interface.h"
+
+namespace Tegra {
+
+void NoteGpSync(bool deferred) {
+    struct Counts {
+        u64 deferred{};
+        u64 drained{};
+        std::chrono::steady_clock::time_point window{std::chrono::steady_clock::now()};
+    };
+    static Counts counts;
+    if (deferred) {
+        ++counts.deferred;
+    } else {
+        ++counts.drained;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - counts.window < std::chrono::seconds{10}) {
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - counts.window).count();
+    LOG_INFO(HW_GPU, "GP sync per second: {:.0f} deferred, {:.0f} drained for a live command list",
+             static_cast<double>(counts.deferred) / seconds,
+             static_cast<double>(counts.drained) / seconds);
+    counts = {};
+    counts.window = now;
+}
+
+} // namespace Tegra
 
 namespace Tegra {
 
@@ -200,11 +229,39 @@ bool DmaPusher::Step() {
     const CommandListHeader& header = current_command;
     dma_state.dma_get = header.addr;
 
-    if (signal_sync && !synced) {
-        std::unique_lock lk(sync_mutex);
-        sync_cv.wait(lk, [this]() { return synced.load(); });
+    if (signal_sync && synced) {
         signal_sync = false;
         synced = false;
+    } else if (signal_sync && !synced) {
+        // The fence was queued in order. A list already copied at submit does not need it
+        // before parsing; a live read of GPU-written or dirty memory still does.
+        const bool defer = Settings::values.defer_gp_sync_drain.GetValue() &&
+                           VideoCommon::GpuSplit::Get().Active();
+        bool from_snapshot = false;
+        if (defer && header.size > 0 && command_resume_offset == 0) {
+            const bool gpu_written =
+                IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            const bool has_snapshot =
+                (command_list.snapshot_suspensions & 1) == 0 &&
+                command_list.snapshot_suspensions == suspensions.load(std::memory_order_acquire) &&
+                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                !std::ranges::binary_search(command_list.deferred_entries,
+                                            static_cast<u32>(dma_pushbuffer_subindex));
+            from_snapshot =
+                VideoCommon::CanUseSubmittedCommands(false, has_snapshot, gpu_written, false);
+        }
+        if (!from_snapshot) {
+            if (defer) {
+                VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::GpSyncFence);
+                NoteGpSync(false);
+            }
+            std::unique_lock lk(sync_mutex);
+            sync_cv.wait(lk, [this]() { return synced.load(); });
+            signal_sync = false;
+            synced = false;
+        } else {
+            NoteGpSync(true);
+        }
     }
 
     if (header.size > 0) {
@@ -390,13 +447,21 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
-        VideoCommon::GpuSplit::Get().Run([this] {
+        const auto fence = [this] {
             rasterizer->SignalFence([this]() {
                 std::scoped_lock lk(sync_mutex);
                 synced = true;
                 sync_cv.notify_all();
             });
-        }, VideoCommon::DrainSite::GpSyncFence);
+        };
+        auto& split = VideoCommon::GpuSplit::Get();
+        if (Settings::values.defer_gp_sync_drain.GetValue() && split.Active()) {
+            // Queued after the methods of this list. The back still runs it before later
+            // methods. The front does not wait here.
+            split.Defer(fence);
+        } else {
+            split.Run(fence, VideoCommon::DrainSite::GpSyncFence);
+        }
     }
 
     return true;

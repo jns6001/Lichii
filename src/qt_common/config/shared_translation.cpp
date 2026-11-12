@@ -319,6 +319,13 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Ensures data consistency between compute and memory operations.\nThis option fixes "
               "issues in games, but may degrade performance.\nUnreal Engine 4 games often see the "
               "most significant changes thereof."));
+    INSERT(Settings, defer_gp_sync_drain, tr("Defer guest sync drains"),
+           tr("With Sync Memory Operations, the GPU thread waits for the other GPU thread at "
+              "every synced command list. In Breath of the Wild that wait is most of a second "
+              "per second of play.\n"
+              "On: the fence still runs in order, and lists already copied at submit are parsed "
+              "without waiting. A list read from memory the GPU wrote still waits.\n"
+              "Off by default."));
     INSERT(Settings, async_presentation, tr("Enable asynchronous presentation (Vulkan only)"),
            tr("Slightly improves performance by moving presentation to a separate CPU thread."));
     INSERT(
