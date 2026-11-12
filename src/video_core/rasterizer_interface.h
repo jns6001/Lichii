@@ -54,6 +54,10 @@ using DiskResourceLoadCallback = std::function<void(LoadCallbackStage, std::size
 /// manager makes that fence even when it is empty (FenceManager::SignalFence).
 inline thread_local bool g_signaling_query_report_fence = false;
 
+/// Set instead of g_signaling_query_report_fence for a payload-only release (no timestamp, not a
+/// counter). FenceManager writes it when the back reaches it if that fence has no downloads.
+inline thread_local bool g_early_payload_fence = false;
+
 class RasterizerInterface {
 public:
     virtual ~RasterizerInterface() = default;

@@ -1692,6 +1692,14 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     keep.draw_deletions = buffer_deletions;
     keep.candidates = {};
     keep.writes.clear();
+    keep.writes_complete = false;
+    // GetValue is virtual. One read per 32 draws is enough for a setting flipped from the UI.
+    static u32 patch_sample{};
+    static bool patch_on{};
+    if ((patch_sample++ & 31) == 0) {
+        patch_on = Settings::values.uniform_patch_uploads.GetValue();
+    }
+    keep.patch = patch_on;
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
     const bool usable = delta != nullptr && unwritten && !delta->overflowed;
     if (usable) {
@@ -1708,6 +1716,7 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     for (u32 write = 0; write < delta->num_device_writes; ++write) {
         keep.writes.emplace_back(delta->device_begin[write], delta->device_end[write]);
     }
+    keep.writes_complete = true;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         keep.candidates[stage] = streamed[stage] & ~delta->binds[stage];
     }
@@ -2575,8 +2584,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
             // EDEN_NX2_UBOREUSE=0 turns it off.
             if (VideoCommon::UniformStreamReuseEnabled()) {
-                streamed = VideoCommon::BindSmallUniformReusing(
-                    runtime, device_memory, stage, index, binding_index, device_addr, size);
+                if (uniform_keep.patch && uniform_keep.writes_complete) {
+                    streamed = VideoCommon::BindSmallUniformPatching(
+                        runtime, device_memory, stage, index, binding_index, device_addr, size,
+                        uniform_keep.writes);
+                }
+                if (!streamed) {
+                    streamed = VideoCommon::BindSmallUniformReusing(
+                        runtime, device_memory, stage, index, binding_index, device_addr, size);
+                }
                 if (streamed) {
                     uniform_keep.streamed[stage] |= 1u << index;
                     ++uniform_keep.streamed_binds;

@@ -778,6 +778,64 @@ struct Values {
     SwitchableSetting<bool> fast_draw_sticky{linkage, false, "fast_draw_sticky",
                                              Category::RendererAdvanced};
 
+    // BotW's hottest macro (code address 0xfe, ~240k calls/s) is the constant-buffer selector
+    // HLE: it only writes the selector registers an interpreted macro would send without ending
+    // a fast-draw chain. The HLE path used to break around the whole call, so the next draw was
+    // a full resolve. On: those two handlers do not break. Shader binds and clears still do.
+    // Off by default.
+    SwitchableSetting<bool> fast_draw_const_macros{linkage, false, "fast_draw_const_macros",
+                                                   Category::RendererAdvanced};
+
+    // A draw that rewrites part of a small uniform still copied the whole guest range into a
+    // new stream allocation. On: copy the previous upload and read only the bytes this draw's
+    // recorded constant-buffer writes overlap. A write the list does not hold still copies
+    // the whole range. Off by default.
+    SwitchableSetting<bool> uniform_patch_uploads{linkage, false, "uniform_patch_uploads",
+                                                  Category::RendererAdvanced};
+
+    // UpdateRenderTargets prepares every colour and depth target on every draw, including when
+    // the target set is unchanged and nothing is waiting to upload. On: that prepare is skipped.
+    // A target that lost its GPU-modified mark, or any other reason RenderTargetsNeedPrepare
+    // reports, is still prepared. Off by default.
+    SwitchableSetting<bool> skip_clean_render_targets{linkage, false,
+                                                      "skip_clean_render_targets",
+                                                      Category::RendererAdvanced};
+
+    // Storage-buffer pointers live in constant buffers and are re-read from guest memory on
+    // every delta draw. On: a delta whose recorded writes missed those pointer words keeps the
+    // bindings from the previous draw. An indirect pointer (read through the buffer, not the
+    // constant word) is still re-read. Off by default.
+    SwitchableSetting<bool> reuse_storage_pointers{linkage, false, "reuse_storage_pointers",
+                                                   Category::RendererAdvanced};
+
+    // BotW's frame-end semaphore is a payload release. The query cache flags every fence report,
+    // so the write waits for the host GPU even when the value does not depend on it. The guest
+    // then spins on the counter until that write. On: a payload with no timestamp is written when
+    // the back reaches it, if that fence has no buffer or texture download and no unsynced
+    // counter query. Timestamped reports and counters stay delayed (Ocarina of Time flashes
+    // white when those land early). Off by default.
+    SwitchableSetting<bool> early_payload_releases{linkage, false, "early_payload_releases",
+                                                   Category::RendererAdvanced};
+
+    // FlushCaching is called on draws that have not written since the last flush. On: return
+    // before translating an empty accumulator. Off by default.
+    SwitchableSetting<bool> skip_empty_invalidation{linkage, false, "skip_empty_invalidation",
+                                                    Category::RendererAdvanced};
+
+    // UpdatePagesCachedBatch reprotects CPU pages when a buffer's cached-page count crosses 0
+    // or 1, including pages whose type (and so their protection) already matches. On: skip
+    // VirtualProtect for a range whose pages are already in the target state. Off by default.
+    SwitchableSetting<bool> skip_unchanged_page_protect{linkage, false,
+                                                        "skip_unchanged_page_protect",
+                                                        Category::RendererAdvanced};
+
+    // defer_gp_sync_drain copies every command list at submit. Only the entries with the sync
+    // bit are parsed without waiting. On: copy those entries only, and do not zero the buffer
+    // before the copy. Other entries stay live reads, as they were before the snapshot. Off by
+    // default.
+    SwitchableSetting<bool> snapshot_sync_entries{linkage, false, "snapshot_sync_entries",
+                                                  Category::RendererAdvanced};
+
     // Uniform keeps otherwise run only on a fast-draw delta. On: a full draw also reuses the
     // previous upload when this draw's inline writes and tracked memory writes missed that
     // range. A store the buffer cache was not told about (an untracked CPU write) is missed.

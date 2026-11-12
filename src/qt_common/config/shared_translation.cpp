@@ -436,6 +436,38 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "records only the draw call. Setup is not run again.\n"
               "Off by default. Needs \"Reuse unchanged draw state\". Skips the draw when a "
               "texture upload, a feedback barrier or a state flag is pending."));
+    INSERT(Settings, fast_draw_const_macros, tr("Keep constant-buffer macros"),
+           tr("Breath of the Wild's constant-buffer selector macros were ending fast-draw "
+              "reuse even though they only write the selector registers.\n"
+              "On: those macros leave the chain intact. Shader binds and clears still break it.\n"
+              "Off by default."));
+    INSERT(Settings, uniform_patch_uploads, tr("Patch constant-buffer uploads"),
+           tr("When a small uniform buffer changes, copy the previous upload and read only the "
+              "bytes this draw wrote.\n"
+              "Off by default. A write the draw did not record still copies the whole buffer."));
+    INSERT(Settings, skip_clean_render_targets, tr("Skip unchanged render targets"),
+           tr("Skips preparing colour and depth targets when the set is unchanged and nothing "
+              "is waiting to upload.\n"
+              "Off by default. A target that needs an upload is still prepared."));
+    INSERT(Settings, reuse_storage_pointers, tr("Reuse unchanged storage pointers"),
+           tr("Keeps storage-buffer bindings on a fast-draw delta when the constant-buffer "
+              "words that hold the pointers were not written.\n"
+              "Off by default. Pointers read through the buffer itself are always re-read."));
+    INSERT(Settings, early_payload_releases, tr("Release fence payloads early"),
+           tr("Writes a semaphore or query payload when the GPU thread reaches it, instead of "
+              "after the host GPU finishes, when that fence is not downloading memory.\n"
+              "Counters and timestamped reports still wait. Off by default.\n"
+              "Breath of the Wild spins until the frame-end payload is written."));
+    INSERT(Settings, skip_empty_invalidation, tr("Skip empty invalidation flushes"),
+           tr("Does not translate a constant-buffer invalidation list that has nothing in it.\n"
+              "Off by default."));
+    INSERT(Settings, skip_unchanged_page_protect, tr("Skip unchanged page protection"),
+           tr("Skips reprotecting CPU pages that are already cached or already uncached.\n"
+              "Off by default."));
+    INSERT(Settings, snapshot_sync_entries, tr("Snapshot synced command lists only"),
+           tr("With deferred guest syncs, copies only the command lists that have the sync "
+              "bit, and does not zero that buffer before the copy.\n"
+              "Off by default: every list is copied."));
     INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
            tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
               "inline writes and tracked memory writes did not touch that range.\n"

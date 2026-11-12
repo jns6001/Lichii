@@ -89,15 +89,28 @@ public:
         // fence runs its operation at once, before the host GPU has run the work the report
         // follows, and Ocarina of Time then reads a wrong report (white flashes on leaves and walls
         // at low GPU accuracy).
-        const bool delay_fence = VideoCore::g_signaling_query_report_fence ||
-                                 (Settings::IsGPUFenceBehaviorDefault()
-                                      ? Settings::IsGPULevelHigh()
-                                      : Settings::IsGPUFenceBehaviorBalanced() ||
-                                            Settings::IsGPUFenceBehaviorAccurate());
+        const bool accuracy_delay =
+            Settings::IsGPUFenceBehaviorDefault()
+                ? Settings::IsGPULevelHigh()
+                : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        // A timestamped report or a counter result still waits for the host GPU. A payload-only
+        // release (g_early_payload_fence) is written here when this fence is not downloading.
+        bool delay_fence = accuracy_delay || VideoCore::g_signaling_query_report_fence;
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        if (VideoCore::g_early_payload_fence) {
+            const bool downloading =
+                committed_flushes != 0 || query_cache.HasUncommittedFlushes();
+            if (accuracy_delay || downloading) {
+                delay_fence = true;
+                Nx2FastDraw::g_payload_held.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                delay_fence = false;
+                Nx2FastDraw::g_payload_early.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if (Nx2Profile::Enabled()) {
             NoteFenceDecision(delay_fence, committed_flushes);
         }

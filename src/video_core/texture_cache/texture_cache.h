@@ -1085,6 +1085,18 @@ bool TextureCache<P>::RescaleRenderTargets() {
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
+    // The target set is unchanged and nothing is waiting to upload. Preparing still walked every
+    // colour and depth image (~30 ms/s in BotW). A lost GPU-modified mark still prepares.
+    static u32 clean_sample{};
+    static bool skip_clean{};
+    if ((clean_sample++ & 31) == 0) {
+        skip_clean = Settings::values.skip_clean_render_targets.GetValue();
+    }
+    if (!is_clear && skip_clean && !maxwell3d->dirty.flags[Dirty::RenderTargets] &&
+        !RenderTargetsNeedPrepare()) {
+        ++VideoCommon::Nx2FastDraw::g_rt_clean_skips;
+        return;
+    }
     struct ClearingScope {
         bool& flag;
         ~ClearingScope() {

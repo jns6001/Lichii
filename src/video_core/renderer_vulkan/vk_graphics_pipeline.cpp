@@ -1184,7 +1184,43 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
     // Storage pointers live in constant buffers. An empty delta did not rewrite them, so the
     // bindings from the previous draw are still the ones BindHostStageBuffers emits. Unbinding
     // here would drop those entries from this draw's descriptor payload.
+    bool reuse_storage = false;
     if (!neutral_only) {
+        // The pointer words were not in this draw's recorded writes, so the bindings the previous
+        // draw left are still the ones BindHostStageBuffers emits. An indirect pointer is read
+        // from the buffer itself and is not covered by that list.
+        static u32 storage_sample{};
+        static bool reuse_setting{};
+        if ((storage_sample++ & 31) == 0) {
+            reuse_setting = Settings::values.reuse_storage_pointers.GetValue();
+        }
+        bool any_storage = false;
+        bool pointers_stable = reuse_setting && buffer_cache.UniformWritesComplete();
+        if (pointers_stable) {
+            for (size_t stage = 0; stage < NUM_STAGES && pointers_stable; ++stage) {
+                if (!configured_stages[stage]) {
+                    continue;
+                }
+                for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                    any_storage = true;
+                    DAddr begin{};
+                    u32 span{};
+                    if (desc.count != 1 || desc.indirect_offset != ~0U ||
+                        !buffer_cache.UniformDeviceSpan(stage, desc.cbuf_index, begin, span) ||
+                        u64{desc.cbuf_offset} + sizeof(u64) > span ||
+                        !buffer_cache.RangeMissesUniformWrites(
+                            begin + desc.cbuf_offset, begin + desc.cbuf_offset + sizeof(u64))) {
+                        pointers_stable = false;
+                        break;
+                    }
+                }
+            }
+        }
+        reuse_storage = pointers_stable && any_storage;
+    }
+    if (reuse_storage) {
+        ++VideoCommon::Nx2FastDraw::g_storage_reused;
+    } else if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (!configured_stages[stage]) {

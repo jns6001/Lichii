@@ -35,8 +35,21 @@
 
 namespace Tegra {
 
+bool SnapshotSyncEntriesOnly() {
+    return Settings::values.snapshot_sync_entries.GetValue();
+}
+
 bool DeferGpSyncSnapshots() {
-    return Settings::values.defer_gp_sync_drain.GetValue();
+    // Called on the submit thread, so not GpuSplit::Active() (the GPU thread starts and stops
+    // the split): the settings that let it run on Switch 1 (GpuSplit::Update). Without them
+    // nothing defers, and a copy would only cost CPU and parse Switch 1 lists from it.
+    if (!Settings::values.defer_gp_sync_drain.GetValue() ||
+        !Settings::values.maxwell_gpu_thread_split.GetValue() || Settings::IsGPULevelHigh() ||
+        Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Vulkan) {
+        return false;
+    }
+    return !(Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh()
+                                           : Settings::IsDMALevelSafe());
 }
 
 void NoteGpSync(bool deferred) {
@@ -250,7 +263,7 @@ bool DmaPusher::Step() {
             const bool has_snapshot =
                 (command_list.snapshot_suspensions & 1) == 0 &&
                 command_list.snapshot_suspensions == suspensions.load(std::memory_order_acquire) &&
-                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
                 !std::ranges::binary_search(command_list.deferred_entries,
                                             static_cast<u32>(dma_pushbuffer_subindex));
             from_snapshot =
@@ -354,7 +367,7 @@ bool DmaPusher::Step() {
                                    suspensions.load(std::memory_order_acquire) &&
                                VideoCommon::CanUseSubmittedCommands(
             command_resume_offset != 0,
-            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+            command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
                 !std::ranges::binary_search(command_list.deferred_entries,
                                             static_cast<u32>(dma_pushbuffer_subindex)),
             gpu_written,
@@ -367,7 +380,7 @@ bool DmaPusher::Step() {
         static const bool live_read_check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
         const CommandHeader* const submitted_copy =
             live_read_check && !submitted &&
-                    dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                    command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
                     !std::ranges::binary_search(command_list.deferred_entries,
                                                 static_cast<u32>(dma_pushbuffer_subindex))
                 ? command_list.submitted_words.data() +
@@ -794,7 +807,8 @@ void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
     for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
+        if (offset == CommandList::NoSnapshot ||
+            u64{offset} + entry.size > list.submitted_words.size()) {
             continue;
         }
         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
@@ -810,7 +824,8 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
         }
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
+        if (offset == CommandList::NoSnapshot ||
+            u64{offset} + entry.size > list.submitted_words.size()) {
             continue;
         }
         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,

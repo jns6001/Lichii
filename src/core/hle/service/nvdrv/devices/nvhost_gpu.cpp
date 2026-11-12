@@ -456,21 +456,54 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
             // Before the copy: a suspension during it must count as one after it.
             entries.snapshot_suspensions =
                 channel_state->payload->dma_pusher.suspensions.load(std::memory_order_acquire);
-            size_t words = 0;
-            for (const auto& entry : entries.command_lists) {
-                words += entry.size;
-            }
-            entries.submitted_words.resize(words);
+            // snapshot_sync_entries copies only the entries the deferral parses without waiting.
+            // The rest stay live reads. The full copy zero-fills the whole submission first.
+            const bool sync_only = Tegra::SnapshotSyncEntriesOnly();
+            entries.submitted_words.clear();
+            entries.submitted_offsets.clear();
             entries.submitted_offsets.reserve(entries.command_lists.size());
+            if (!sync_only) {
+                size_t words = 0;
+                for (const auto& entry : entries.command_lists) {
+                    words += entry.size;
+                }
+                entries.submitted_words.resize(words);
+            }
+            // Reused so a sync-only copy does not value-initialize the destination before reading.
+            // Growth still value-initializes the new tail once; later entries overwrite it.
+            thread_local std::vector<Tegra::CommandHeader> scratch;
             size_t offset = 0;
             for (u32 i = 0; i < entries.command_lists.size(); ++i) {
                 const auto& entry = entries.command_lists[i];
+                if (sync_only && entry.sync.Value() == 0) {
+                    entries.submitted_offsets.push_back(Tegra::CommandList::NoSnapshot);
+                    continue;
+                }
+                const u64 bytes = static_cast<u64>(entry.size) * sizeof(u32);
+                const bool pending = system.GPU().IsMapPending(entry.addr, bytes);
+                if (sync_only) {
+                    entries.submitted_offsets.push_back(
+                        static_cast<u32>(entries.submitted_words.size()));
+                    if (pending) {
+                        entries.deferred_entries.push_back(i);
+                        entries.submitted_words.insert(entries.submitted_words.end(), entry.size,
+                                                       {});
+                    } else if (entry.size != 0) {
+                        if (scratch.size() < entry.size) {
+                            scratch.resize(entry.size);
+                        }
+                        channel_state->memory_manager->ReadBlockUnsafe(entry.addr, scratch.data(),
+                                                                       bytes);
+                        entries.submitted_words.insert(entries.submitted_words.end(), scratch.begin(),
+                                                       scratch.begin() + entry.size);
+                    }
+                    continue;
+                }
                 entries.submitted_offsets.push_back(static_cast<u32>(offset));
                 // GMMU maps run on the GPU thread (GPU::MapInOrder): an entry on addresses a
                 // queued map changes would copy as zeros (Pokopia's first lists). DmaPusher::Push
                 // copies it after the map instead.
-                const u64 bytes = static_cast<u64>(entry.size) * sizeof(u32);
-                if (system.GPU().IsMapPending(entry.addr, bytes)) {
+                if (pending) {
                     entries.deferred_entries.push_back(i);
                 } else {
                     channel_state->memory_manager->ReadBlockUnsafe(

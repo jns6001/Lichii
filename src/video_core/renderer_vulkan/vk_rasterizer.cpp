@@ -74,6 +74,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/buffer_cache/uniform_stream_reuse.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
@@ -643,6 +644,13 @@ void RasterizerVulkan::ReportFastDraws() {
     // Logged only with EDEN_NX2_GPU_PROFILE or EDEN_NX2_FAST_DRAW_VERIFY.
     if (!VideoCommon::Nx2Profile::Enabled() && !fast_draw_verify) {
         stats = FastDrawStats{.window_start = now};
+        VideoCommon::Nx2FastDraw::g_macro_notes = {};
+        VideoCommon::Nx2FastDraw::g_macro_note_overflow = 0;
+        VideoCommon::Nx2FastDraw::g_rt_clean_skips = 0;
+        VideoCommon::Nx2FastDraw::g_storage_reused = 0;
+        VideoCommon::g_uniform_patched = 0;
+        VideoCommon::g_uniform_copied = 0;
+        VideoCommon::g_uniform_reused = 0;
         return;
     }
     const double seconds = static_cast<double>(now - stats.window_start) / 1e9;
@@ -714,6 +722,50 @@ void RasterizerVulkan::ReportFastDraws() {
              static_cast<double>(stats.sticky_skip_barrier) / seconds,
              static_cast<double>(stats.dynamic_skipped) / seconds,
              static_cast<double>(stats.invalidation_flushes) / seconds);
+    std::string macros;
+    for (const VideoCommon::Nx2FastDraw::MacroNote& note : VideoCommon::Nx2FastDraw::g_macro_notes) {
+        if (note.count == 0) {
+            continue;
+        }
+        macros += fmt::format(" {:#x}:{}:{}:{:.0f}", note.method, note.kind,
+                              note.kept ? "kept" : "broke",
+                              static_cast<double>(note.count) / seconds);
+    }
+    if (VideoCommon::Nx2FastDraw::g_macro_note_overflow != 0) {
+        macros += fmt::format(" overflow {:.0f}",
+                              static_cast<double>(VideoCommon::Nx2FastDraw::g_macro_note_overflow) /
+                                  seconds);
+    }
+    const auto take = [](std::atomic<u64>& counter) {
+        return static_cast<double>(counter.exchange(0, std::memory_order_relaxed)) / 1.0;
+    };
+    const double payload_early = take(VideoCommon::Nx2FastDraw::g_payload_early);
+    const double payload_held = take(VideoCommon::Nx2FastDraw::g_payload_held);
+    const double inval_empty = take(VideoCommon::Nx2FastDraw::g_inval_empty);
+    const double inval_ran = take(VideoCommon::Nx2FastDraw::g_inval_ran);
+    const double protect_skipped = take(VideoCommon::Nx2FastDraw::g_protect_skipped);
+    const double protect_ran = take(VideoCommon::Nx2FastDraw::g_protect_ran);
+    LOG_INFO(Render_Vulkan,
+             "Draw setup per second: macros{} | uniforms {:.0f} patched, {:.0f} copied, {:.0f} "
+             "reused | render targets {:.0f} skipped | storage pointers {:.0f} reused",
+             macros.empty() ? " none" : macros,
+             static_cast<double>(VideoCommon::g_uniform_patched) / seconds,
+             static_cast<double>(VideoCommon::g_uniform_copied) / seconds,
+             static_cast<double>(VideoCommon::g_uniform_reused) / seconds,
+             static_cast<double>(VideoCommon::Nx2FastDraw::g_rt_clean_skips) / seconds,
+             static_cast<double>(VideoCommon::Nx2FastDraw::g_storage_reused) / seconds);
+    LOG_INFO(Render_Vulkan,
+             "Payload releases per second: {:.0f} early, {:.0f} held | invalidation {:.0f} ran, "
+             "{:.0f} empty | page protection {:.0f} changed, {:.0f} skipped",
+             payload_early / seconds, payload_held / seconds, inval_ran / seconds,
+             inval_empty / seconds, protect_ran / seconds, protect_skipped / seconds);
+    VideoCommon::Nx2FastDraw::g_macro_notes = {};
+    VideoCommon::Nx2FastDraw::g_macro_note_overflow = 0;
+    VideoCommon::Nx2FastDraw::g_rt_clean_skips = 0;
+    VideoCommon::Nx2FastDraw::g_storage_reused = 0;
+    VideoCommon::g_uniform_patched = 0;
+    VideoCommon::g_uniform_copied = 0;
+    VideoCommon::g_uniform_reused = 0;
     if (fast_draw_verify) {
         LOG_INFO(Render_Vulkan,
                  "Fast draw verify per second: {:.0f} checked, {:.0f} pipeline mismatches, {:.0f} "

@@ -205,4 +205,43 @@ inline void NoteDeviceData(DAddr begin, DAddr end) {
     }
 }
 
+/// Macro calls that broke a chain, and constant-buffer selector calls that were kept. The GPU
+/// back thread writes this; the fast-draw report reads and clears it.
+struct MacroNote {
+    u32 method{};
+    u32 count{};
+    const char* kind{};
+    bool kept{};
+};
+
+inline std::array<MacroNote, 16> g_macro_notes{};
+inline u64 g_macro_note_overflow{};
+inline u64 g_rt_clean_skips{};
+inline u64 g_storage_reused{};
+/// Payload fence releases written when the back reaches them, and those still held for the host
+/// GPU. The fencing decision is on the GPU thread; the fast-draw report reads these.
+inline std::atomic<u64> g_payload_early{};
+inline std::atomic<u64> g_payload_held{};
+/// FlushCaching calls with an empty accumulator, and calls that translated ranges.
+inline std::atomic<u64> g_inval_empty{};
+inline std::atomic<u64> g_inval_ran{};
+/// RasterizerMarkRegionCached ranges whose protection was already the target, and ranges
+/// reprotected.
+inline std::atomic<u64> g_protect_skipped{};
+inline std::atomic<u64> g_protect_ran{};
+
+inline void NoteMacro(u32 method, const char* kind, bool kept) {
+    for (MacroNote& note : g_macro_notes) {
+        if (note.count != 0 && note.method == method && note.kind == kind && note.kept == kept) {
+            ++note.count;
+            return;
+        }
+        if (note.count == 0) {
+            note = MacroNote{method, 1, kind, kept};
+            return;
+        }
+    }
+    ++g_macro_note_overflow;
+}
+
 } // namespace VideoCommon::Nx2FastDraw

@@ -542,6 +542,40 @@ public:
                uniform_keep.draw_deletions == buffer_deletions;
     }
 
+    /// The recorded constant-buffer writes since the previous draw are the whole set (the delta
+    /// was not dropped, and no memory-write note was lost).
+    [[nodiscard]] bool UniformWritesComplete() const noexcept {
+        return uniform_keep.writes_complete;
+    }
+
+    /// Whether [begin, end) misses every recorded uniform write. False when the list is incomplete.
+    [[nodiscard]] bool RangeMissesUniformWrites(DAddr begin, DAddr end) const noexcept {
+        if (!uniform_keep.writes_complete || begin >= end) {
+            return false;
+        }
+        for (const auto& write : uniform_keep.writes) {
+            if (write.first < end && begin < write.second) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Device range of a bound graphics uniform slot. False when the slot is empty.
+    [[nodiscard]] bool UniformDeviceSpan(size_t stage, u32 index, DAddr& begin,
+                                        u32& size) const noexcept {
+        if (stage >= NUM_STAGES || index >= NUM_GRAPHICS_UNIFORM_BUFFERS) {
+            return false;
+        }
+        const Binding& binding = channel_state->uniform_buffers[stage][index];
+        if (binding.device_addr == 0 || binding.size == 0) {
+            return false;
+        }
+        begin = binding.device_addr;
+        size = binding.size;
+        return true;
+    }
+
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
     bool any_buffer_uploaded = false;
@@ -823,6 +857,10 @@ private:
             writes;
         boost::container::static_vector<std::pair<DAddr, DAddr>, 8> memory_writes;
         bool memory_writes_lost{}; ///< More writes than memory_writes holds
+        /// `writes` holds every inline and tracked write since the previous draw.
+        bool writes_complete{};
+        /// uniform_patch_uploads, sampled once per draw.
+        bool patch{};
         u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
         u64 kept{};
         u64 streamed_binds{};

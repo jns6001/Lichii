@@ -1373,6 +1373,79 @@ bool DrawOnlyHleSkipsBreak(const AnyCachedMacro& program) {
            std::holds_alternative<HLE_DrawIndirectByteCount>(program);
 }
 
+/// HLE_C713 writes the constant-buffer selector (address, size 0x7000, offset). HLE_D733 writes
+/// the selector address and size from the scratch table. Neither binds a stage slot or draws.
+/// An interpreted copy of either sends those registers through CallMethod, and they are delta
+/// methods, so the chain stays up. The HLE writes the registers itself and used to break anyway.
+bool IsConstSelectorHle(const AnyCachedMacro& program) {
+    return std::holds_alternative<HLE_C713C83D8F63CCF3>(program) ||
+           std::holds_alternative<HLE_D7333D26E0A93EDE>(program);
+}
+
+bool ConstMacrosKept() {
+    // Sampled: this runs on every macro call, and GetValue is a virtual call.
+    static u32 sample{};
+    static bool on{};
+    if ((sample++ & 31) == 0) {
+        on = Settings::values.fast_draw_const_macros.GetValue();
+    }
+    return on;
+}
+
+const char* MacroKind(const AnyCachedMacro& program) {
+    if (std::holds_alternative<HLE_C713C83D8F63CCF3>(program)) {
+        return "const-selector";
+    }
+    if (std::holds_alternative<HLE_D7333D26E0A93EDE>(program)) {
+        return "const-table";
+    }
+    if (std::holds_alternative<HLE_BindShader>(program)) {
+        return "bind-shader";
+    }
+    if (std::holds_alternative<HLE_ClearConstBuffer>(program)) {
+        return "clear-const";
+    }
+    if (std::holds_alternative<HLE_ClearMemory>(program)) {
+        return "clear-memory";
+    }
+    if (std::holds_alternative<HLE_SetRasterBoundingBox>(program)) {
+        return "raster-box";
+    }
+    if (std::holds_alternative<HLE_TransformFeedbackSetup>(program)) {
+        return "tf-setup";
+    }
+    if (std::holds_alternative<HLE_MultiLayerClear>(program)) {
+        return "layer-clear";
+    }
+    if (std::holds_alternative<HLE_DrawArraysIndirect>(program)) {
+        return "draw-arrays";
+    }
+    if (std::holds_alternative<HLE_DrawIndexedIndirect>(program)) {
+        return "draw-indexed";
+    }
+    if (std::holds_alternative<HLE_MultiDrawIndexedIndirectCount>(program)) {
+        return "draw-multi";
+    }
+    if (std::holds_alternative<HLE_DrawIndirectByteCount>(program)) {
+        return "draw-byte";
+    }
+    if (std::holds_alternative<MacroInterpreterImpl>(program)) {
+        return "interpreter";
+    }
+    if (std::holds_alternative<std::unique_ptr<DynamicCachedMacro>>(program)) {
+        return "jit";
+    }
+    return "other";
+}
+
+void NoteBreakingMacro(u32 method, const AnyCachedMacro& program, bool keep) {
+    const bool selector = IsConstSelectorHle(program);
+    if (keep && !selector) {
+        return;
+    }
+    VideoCommon::Nx2FastDraw::NoteMacro(method, MacroKind(program), keep);
+}
+
 } // namespace
 
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
@@ -1660,7 +1733,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
         const bool keep = FastDrawReuseKeepsMacro(it->second.program) ||
-                          DrawOnlyHleSkipsBreak(it->second.program);
+                          DrawOnlyHleSkipsBreak(it->second.program) ||
+                          (ConstMacrosKept() && IsConstSelectorHle(it->second.program));
+        NoteBreakingMacro(method, it->second.program, keep);
         if (!keep) {
             FastDraw::Break(FastDraw::Reason::Method, method);
         }
@@ -1708,7 +1783,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         ci.program = Compile(system, maxwell3d, code);
     }
 
-    const bool keep = FastDrawReuseKeepsMacro(ci.program) || DrawOnlyHleSkipsBreak(ci.program);
+    const bool keep = FastDrawReuseKeepsMacro(ci.program) || DrawOnlyHleSkipsBreak(ci.program) ||
+                      (ConstMacrosKept() && IsConstSelectorHle(ci.program));
+    NoteBreakingMacro(method, ci.program, keep);
     if (!keep) {
         FastDraw::Break(FastDraw::Reason::Method, method);
     }
