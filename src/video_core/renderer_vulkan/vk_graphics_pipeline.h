@@ -342,7 +342,9 @@ public:
     /// the constant buffers again) and records the draw's descriptors with the image views,
     /// samplers and texture buffers the last captured Configure resolved. False when the draw
     /// can't be recorded, as for Configure.
-    bool ConfigureDelta(bool is_indexed);
+    /// `neutral_only`: vertex and index buffers are not dirty. Skip resolving them again.
+    /// Host binds, uniforms and image-descriptor replay still run.
+    bool ConfigureDelta(bool is_indexed, bool neutral_only = false);
 
     /// The next Configure keeps the views and samplers it resolves for delta draws. With
     /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.

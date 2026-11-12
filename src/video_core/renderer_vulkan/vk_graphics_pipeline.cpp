@@ -1162,12 +1162,24 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
+    // A neutral draw (padding / vertex-id-base only, vertex buffers clean) still pushes
+    // uniforms and storage descriptors: the queue is rebuilt every draw. It does not walk
+    // the geometry cache again. Image descriptors replay when the previous draw kept them;
+    // otherwise this falls back to a normal delta configure.
+    const bool replay_images_now =
+        neutral_only && kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch();
+    if (neutral_only && !replay_images_now) {
+        neutral_only = false;
+    }
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
-    {
+    // Storage pointers live in constant buffers. An empty delta did not rewrite them, so the
+    // bindings from the previous draw are still the ones BindHostStageBuffers emits. Unbinding
+    // here would drop those entries from this draw's descriptor payload.
+    if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (!configured_stages[stage]) {
@@ -1186,7 +1198,11 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     }
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        buffer_cache.UpdateGraphicsBuffers(is_indexed);
+        // UpdateGraphicsBuffers resolves addresses and uploads. Neutral draws did not dirty
+        // those bindings; binding the host buffers again keeps the command buffer's vertex state.
+        if (!neutral_only) {
+            buffer_cache.UpdateGraphicsBuffers(is_indexed);
+        }
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
     {

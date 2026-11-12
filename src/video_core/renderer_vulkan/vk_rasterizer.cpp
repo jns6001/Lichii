@@ -1063,9 +1063,28 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     const bool delta_holds =
         delta_pipeline != nullptr && DeltaStillHolds(draw_serial, draw_map_serial);
     const DrawPath path = delta_holds && !verify_pipeline ? DrawPath::Delta : DrawPath::Full;
-    buffer_cache.BeginGraphicsUniforms(path == DrawPath::Delta ? &taken_delta : nullptr);
+    // Full draws still collected inline constant writes into taken_delta (TakeReusableDraw
+    // always swaps it). uniform_keep_full_draws uses those to drop unchanged slots.
+    const bool keep_full = Settings::values.uniform_keep_full_draws.GetValue();
+    buffer_cache.BeginGraphicsUniforms(
+        fast_draw_on && (path == DrawPath::Delta || keep_full) ? &taken_delta : nullptr);
     if (path == DrawPath::Delta) {
-        if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->ConfigureDelta(is_indexed)) {
+        const auto& geom = maxwell3d->dirty.flags;
+        bool geometry_dirty = geom[VideoCommon::Dirty::VertexBuffers] ||
+                              geom[VideoCommon::Dirty::IndexBuffer];
+        if (!geometry_dirty) {
+            for (u32 binding = 0; binding < 32; ++binding) {
+                if (geom[VideoCommon::Dirty::VertexBuffer0 + binding]) {
+                    geometry_dirty = true;
+                    break;
+                }
+            }
+        }
+        // Empty delta: no constant-buffer writes or rebinds since the previous draw.
+        const bool neutral_only = Settings::values.fast_draw_neutral_regs.GetValue() &&
+                                  taken_delta.Empty() && !geometry_dirty;
+        if (Profile::Scope scope{Profile::Zone::Configure};
+            !pipeline->ConfigureDelta(is_indexed, neutral_only)) {
             report_failure("configure failed");
             TraceRenderState(is_indexed, "configure-failed", nullptr);
             return;

@@ -346,6 +346,21 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     method_sink.clear();
 }
 
+bool Maxwell3D::IsFastDrawNeutral(u32 method) {
+    if (!Settings::values.fast_draw_neutral_regs.GetValue()) {
+        return false;
+    }
+    // Stored, never read. Draw base vertex comes from global_base_vertex_index.
+    if (method == MAXWELL3D_REG_INDEX(vertex_id_base)) {
+        return true;
+    }
+    // Transform-feedback padding between the buffer array (ends at 0x400) and the controls
+    // (0x700). BotW writes 0x183 and 0x1a2 here on almost every draw.
+    constexpr u32 padding_begin = 0x400 / sizeof(u32);
+    constexpr u32 padding_end = 0x700 / sizeof(u32);
+    return method >= padding_begin && method < padding_end;
+}
+
 bool Maxwell3D::IsFastDrawParameter(u32 method) {
     switch (method) {
     case MAXWELL3D_REG_INDEX(const_buffer.size):

@@ -418,6 +418,16 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Off by default: that reuse previously ran only on the Switch 2 split, and every "
               "macro ended it. Can render stale textures if a macro changes state without a "
               "method write."));
+    INSERT(Settings, fast_draw_neutral_regs, tr("Ignore per-draw padding writes"),
+           tr("Breath of the Wild writes SET_VERTEX_ID_BASE and unused transform-feedback "
+              "words before almost every draw. Those do not change textures or buffers.\n"
+              "On: they no longer force a full draw setup. A draw whose vertex buffers also "
+              "stayed put replays the previous image descriptors."));
+    INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
+           tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
+              "inline writes and tracked memory writes did not touch that range.\n"
+              "Off by default. Misses a store into uniform memory the buffer cache is not "
+              "watching."));
     INSERT(Settings, vulkan_flush_draws, tr("Vulkan submit interval (draws)"),
            tr("Switch 1 only. 0 keeps the built-in interval (4096 draws, 128 on MoltenVK).\n"
               "A smaller interval submits the frame while the GPU thread is still building it, "
@@ -425,8 +435,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, gpu_buffer_fence_downloads, tr("Download GPU buffers at fences"),
            tr("Switch 1 copies every buffer the GPU wrote back to guest memory when a fence "
               "completes.\n"
-              "Off copies back only ranges the game has already read on the CPU. Faster, and "
-              "wrong if the game reads other GPU-written buffers."));
+              "Off does not. A later CPU read of that memory flushes it on demand, instead of "
+              "marking the page and copying it again at every fence."));
     INSERT(Settings, use_video_framerate, tr("Sync to framerate of video playback"),
            tr("Run the game at normal speed during video playback, even when the framerate is "
               "unlocked."));

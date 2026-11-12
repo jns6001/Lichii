@@ -756,6 +756,20 @@ struct Values {
     SwitchableSetting<bool> fast_draw_reuse{linkage, false, "fast_draw_reuse",
                                             Category::RendererAdvanced};
 
+    // BotW breaks fast-draw reuse on every draw by writing SET_VERTEX_ID_BASE (method 0x446,
+    // stored and never read) and the unused transform-feedback padding words (0x183, 0x1a2,
+    // the hole between 0x400 and 0x700). On: those writes do not end the chain, and a draw
+    // whose textures and vertex buffers did not change replays the previous descriptors
+    // instead of resolving images and rebinding storage again.
+    SwitchableSetting<bool> fast_draw_neutral_regs{linkage, false, "fast_draw_neutral_regs",
+                                                   Category::RendererAdvanced};
+
+    // Uniform keeps otherwise run only on a fast-draw delta. On: a full draw also reuses the
+    // previous upload when this draw's inline writes and tracked memory writes missed that
+    // range. A store the buffer cache was not told about (an untracked CPU write) is missed.
+    SwitchableSetting<bool> uniform_keep_full_draws{linkage, false, "uniform_keep_full_draws",
+                                                    Category::RendererAdvanced};
+
     // 0: Switch 1 submits every 4096 draws (128 on MoltenVK), Switch 2 keeps its own budget.
     // Any other value is the Switch 1 draw count between Vulkan submissions, rounded up to
     // a multiple of 32. Smaller values let the host GPU start the frame while the GPU thread
