@@ -406,6 +406,27 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
         Settings, use_reactive_flushing, tr("Enable Reactive Flushing"),
         tr("Uses reactive flushing instead of predictive flushing, allowing more accurate memory "
            "syncing."));
+    INSERT(Settings, maxwell_gpu_thread_split, tr("Maxwell GPU thread split"),
+           tr("Switch 1 only. Runs engine method processing on a second thread while the GPU "
+              "thread parses commands.\n"
+              "Does nothing while GPU accuracy is Accurate or DMA accuracy is Safe, and nothing "
+              "for Switch 2 titles (they already split).\n"
+              "Off by default. EDEN_NX2_SPLIT=0 forces it off."));
+    INSERT(Settings, fast_draw_reuse, tr("Reuse unchanged draw state"),
+           tr("Keeps draw setup, including uniform buffers whose bytes have not changed, across "
+              "draws on the single GPU thread.\n"
+              "Off by default: that reuse previously ran only on the Switch 2 split, and every "
+              "macro ended it. Can render stale textures if a macro changes state without a "
+              "method write."));
+    INSERT(Settings, vulkan_flush_draws, tr("Vulkan submit interval (draws)"),
+           tr("Switch 1 only. 0 keeps the built-in interval (4096 draws, 128 on MoltenVK).\n"
+              "A smaller interval submits the frame while the GPU thread is still building it, "
+              "so the host GPU can start sooner. Rounded up to a multiple of 32."));
+    INSERT(Settings, gpu_buffer_fence_downloads, tr("Download GPU buffers at fences"),
+           tr("Switch 1 copies every buffer the GPU wrote back to guest memory when a fence "
+              "completes.\n"
+              "Off copies back only ranges the game has already read on the CPU. Faster, and "
+              "wrong if the game reads other GPU-written buffers."));
     INSERT(Settings, use_video_framerate, tr("Sync to framerate of video playback"),
            tr("Run the game at normal speed during video playback, even when the framerate is "
               "unlocked."));

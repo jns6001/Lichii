@@ -572,7 +572,20 @@ void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_inde
         if (buffer_cache_runtime.AnyVertexRepacked()) return Ineligible::Repacked;
         if (!scheduler.IsRenderPassActive()) return Ineligible::NoRenderPass;
         if (scheduler.BoundGraphicsPipeline() != pipeline) return Ineligible::PipelineNotBound;
-        if (!VideoCommon::GpuSplit::OnBackThread()) return Ineligible::OffBackThread;
+        // Fast draws were recorded only on the split's back thread, so a Switch 1 title (one
+        // GPU thread, not the back) never kept a draw and its uniform buffers were re-read
+        // every time. With the split running, the front still must not record: the back owns
+        // the draw. fast_draw_reuse extends recording to the single GPU thread.
+        const bool on_raster_thread = [&] {
+            if (!Settings::values.fast_draw_reuse.GetValue()) {
+                return VideoCommon::GpuSplit::OnBackThread();
+            }
+            if (VideoCommon::GpuSplit::Get().BackRunning()) {
+                return VideoCommon::GpuSplit::OnBackThread();
+            }
+            return VideoCommon::GpuSplit::OwnsScheduler();
+        }();
+        if (!on_raster_thread) return Ineligible::OffBackThread;
         return std::nullopt;
     }();
     if (ineligible) {
@@ -3633,7 +3646,17 @@ void RasterizerVulkan::FlushWork() {
                        ? static_cast<u32>(std::max(32L, std::strtol(value, nullptr, 10)) & ~31L)
                        : 0U;
         }();
-        legacy_budget = forced_draws != 0 ? forced_draws : (device.IsMoltenVK() ? 128U : 4096U);
+        const u32 setting = Settings::values.vulkan_flush_draws.GetValue();
+        // Advance() only submits when the counter is one less than a multiple of 32, so a
+        // budget that is not itself a multiple of 32 still waits until the next one.
+        const u32 from_setting = setting == 0 ? 0U : (std::max)(32U, (setting + 31U) & ~31U);
+        if (from_setting != 0) {
+            legacy_budget = from_setting;
+        } else if (forced_draws != 0) {
+            legacy_budget = forced_draws;
+        } else {
+            legacy_budget = device.IsMoltenVK() ? 128U : 4096U;
+        }
     }
     switch (SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget)) {
     case SubmissionPolicy::Action::None:

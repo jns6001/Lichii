@@ -789,7 +789,9 @@ private:
     /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
     /// between the two draws wrote its range: no inline constant data, no rebind, no CPU write the
     /// caches were told about, no GPU write and no buffer deletion. Anything else in between ends
-    /// the delta chain.
+    /// the delta chain. The chain is recorded only on the split's back thread unless
+    /// fast_draw_reuse is on, and every macro ends it unless that setting is on and the macro is
+    /// interpreted or JIT-compiled. A Switch 1 profile therefore reports keeps of 0 until then.
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
     void NoteUniformWrite(DAddr device_addr, u64 size) {
@@ -841,6 +843,11 @@ private:
         }();
         if (forced >= 0) {
             return forced == 1;
+        }
+        // Switch 2 never copies every GPU write back (UsesNativeTiling). Switch 1 does, unless
+        // the setting says to copy only ranges the guest has already read (Preflushable).
+        if (!Settings::values.gpu_buffer_fence_downloads.GetValue()) {
+            return false;
         }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
