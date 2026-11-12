@@ -259,6 +259,9 @@ public:
     /// `keep_page_gpu_data`: download GPU-written bytes sharing the written pages first (false
     /// when the memory is going away).
     void WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data = true);
+    /// A repeated write to memory no cached buffer owns and no GPU write shares a page with.
+    /// Notes the uniform keep and returns true so the caller can skip WriteMemory.
+    [[nodiscard]] bool AbsorbRepeatedCpuWrite(DAddr device_addr, u64 size);
 
     void CachedWriteMemory(DAddr device_addr, u64 size);
 

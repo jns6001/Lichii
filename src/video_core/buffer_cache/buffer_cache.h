@@ -222,6 +222,20 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 }
 
 template <class P>
+bool BufferCache<P>::AbsorbRepeatedCpuWrite(DAddr device_addr, u64 size) {
+    const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    if (gpu_modified_ranges.Intersects(page_begin, page_end - page_begin) ||
+        !memory_tracker.IsRegionCpuModified(device_addr, size) ||
+        IsRegionRegistered(device_addr, size)) {
+        return false;
+    }
+    NoteUniformWrite(device_addr, size);
+    MarkVertexBuffersStale(device_addr, size);
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
     NoteUniformWrite(device_addr, size);

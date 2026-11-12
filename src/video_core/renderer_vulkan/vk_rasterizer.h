@@ -431,6 +431,14 @@ private:
     struct FastDrawStats {
         u64 delta{};
         u64 sticky{};
+        /// Deltas whose only change was constant-buffer bytes. Counted in the sticky prepare time.
+        u64 uniform_fast{};
+        /// Invalidation ranges already CPU-modified, with no cached buffer on the page.
+        u64 invalidation_repeat{};
+        /// Dynamic-state early-outs refused because the fragment colour mask changed.
+        u64 dynamic_mask{};
+        u64 dynamic_topology{};
+        std::array<u32, 128> dynamic_flag_hits{};
         /// UpdateDynamicStates returned without recording: no dynamic-state flag was set.
         u64 dynamic_skipped{};
         /// Draws whose FlushCaching had a range to invalidate.

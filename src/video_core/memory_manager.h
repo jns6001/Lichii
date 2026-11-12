@@ -313,6 +313,20 @@ private:
 
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
+    /// Device addresses of WriteBlockCached, recorded while the bytes are copied so FlushCaching
+    /// does not translate the GPU addresses again.
+    bool record_cached_devices{};
+    std::vector<std::pair<DAddr, size_t>> cached_device_writes;
+    void NoteCachedDeviceWrite(DAddr addr, size_t size) {
+        if (!cached_device_writes.empty()) {
+            auto& last = cached_device_writes.back();
+            if (last.first + last.second == addr) {
+                last.second += size;
+                return;
+            }
+        }
+        cached_device_writes.emplace_back(addr, size);
+    }
 
     static std::atomic<size_t> unique_identifier_generator;
 

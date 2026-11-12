@@ -700,11 +700,13 @@ void RasterizerVulkan::ReportFastDraws() {
              all_draws == 0 ? 0.0 : static_cast<double>(all_ns) / 1e3 / static_cast<double>(all_draws),
              static_cast<double>(all_draws) / seconds);
     LOG_INFO(Render_Vulkan,
-             "Fast draw sticky per second: {:.0f} recorded | not sticky: {:.0f} const writes, "
-             "{:.0f} geometry, {:.0f} buffer cache, {:.0f} dynamic state, {:.0f} images, {:.0f} "
-             "render targets, {:.0f} feedback barrier | dynamic state skipped {:.0f} | "
-             "invalidation flushes {:.0f}",
+             "Fast draw sticky per second: {:.0f} recorded, {:.0f} uniform-only | not sticky: {:.0f} "
+             "const writes, {:.0f} geometry, {:.0f} buffer cache, {:.0f} dynamic state, {:.0f} "
+             "images, {:.0f} render targets, {:.0f} feedback barrier | dynamic state skipped "
+             "{:.0f} (colour mask {:.0f}, topology {:.0f}) | invalidation flushes {:.0f}, "
+             "repeated {:.0f}",
              static_cast<double>(stats.sticky) / seconds,
+             static_cast<double>(stats.uniform_fast) / seconds,
              static_cast<double>(stats.sticky_skip_writes) / seconds,
              static_cast<double>(stats.sticky_skip_geometry) / seconds,
              static_cast<double>(stats.sticky_skip_cache) / seconds,
@@ -713,7 +715,56 @@ void RasterizerVulkan::ReportFastDraws() {
              static_cast<double>(stats.sticky_skip_targets) / seconds,
              static_cast<double>(stats.sticky_skip_barrier) / seconds,
              static_cast<double>(stats.dynamic_skipped) / seconds,
-             static_cast<double>(stats.invalidation_flushes) / seconds);
+             static_cast<double>(stats.dynamic_mask) / seconds,
+             static_cast<double>(stats.dynamic_topology) / seconds,
+             static_cast<double>(stats.invalidation_flushes) / seconds,
+             static_cast<double>(stats.invalidation_repeat) / seconds);
+    {
+        std::vector<std::pair<u32, u32>> dirty_flags;
+        for (u32 id = 0; id < stats.dynamic_flag_hits.size(); ++id) {
+            if (stats.dynamic_flag_hits[id] != 0) {
+                dirty_flags.emplace_back(stats.dynamic_flag_hits[id], id);
+            }
+        }
+        const size_t shown_flags = std::min<size_t>(dirty_flags.size(), 8);
+        std::partial_sort(dirty_flags.begin(), dirty_flags.begin() + shown_flags, dirty_flags.end(),
+                          std::greater{});
+        const auto flag_name = [](u32 id) -> const char* {
+            switch (id) {
+            case VideoCommon::Dirty::VertexBuffers: return "vertex-buffers";
+            case VideoCommon::Dirty::DepthBiasGlobal: return "depth-bias-global";
+            case VideoCommon::Dirty::RescaleViewports: return "rescale-viewports";
+            case VideoCommon::Dirty::RescaleScissors: return "rescale-scissors";
+            case static_cast<u32>(Dirty::VertexInput): return "vertex-input";
+            case static_cast<u32>(Dirty::Viewports): return "viewports";
+            case static_cast<u32>(Dirty::Scissors): return "scissors";
+            case static_cast<u32>(Dirty::DepthBias): return "depth-bias";
+            case static_cast<u32>(Dirty::DepthBiasEnable): return "depth-bias-enable";
+            case static_cast<u32>(Dirty::Blending): return "blending";
+            case static_cast<u32>(Dirty::BlendEnable): return "blend-enable";
+            case static_cast<u32>(Dirty::BlendEquations): return "blend-equations";
+            case static_cast<u32>(Dirty::ColorMask): return "color-mask";
+            case static_cast<u32>(Dirty::CullMode): return "cull";
+            case static_cast<u32>(Dirty::DepthTestEnable): return "depth-test";
+            case static_cast<u32>(Dirty::DepthWriteEnable): return "depth-write";
+            case static_cast<u32>(Dirty::StencilTestEnable): return "stencil";
+            default: return nullptr;
+            }
+        };
+        std::string dirty;
+        for (size_t i = 0; i < shown_flags; ++i) {
+            const u32 id = dirty_flags[i].second;
+            const double rate = static_cast<double>(dirty_flags[i].first) / seconds;
+            if (const char* const name = flag_name(id)) {
+                dirty += fmt::format(" {}:{:.0f}", name, rate);
+            } else {
+                dirty += fmt::format(" #{}:{:.0f}", id, rate);
+            }
+        }
+        if (!dirty.empty()) {
+            LOG_INFO(Render_Vulkan, "Dynamic state flags still set per second:{}", dirty);
+        }
+    }
     if (fast_draw_verify) {
         LOG_INFO(Render_Vulkan,
                  "Fast draw verify per second: {:.0f} checked, {:.0f} pipeline mismatches, {:.0f} "
@@ -1121,6 +1172,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     // fast_draw_sticky: a delta with nothing new to upload or bind records the draw only.
     // Pipeline, descriptors, vertex buffers and dynamic state already stick in this render pass.
     bool sticky = false;
+    bool uniform_fast = false;
     if (path == DrawPath::Delta) {
         const auto& geom = maxwell3d->dirty.flags;
         bool geometry_dirty = geom[VideoCommon::Dirty::VertexBuffers] ||
@@ -1140,22 +1192,35 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                        (scheduler.RenderPassHasStores() ||
                         texture_cache.SamplesRenderTarget(pipeline->DeltaViews()));
             };
-            if (!taken_delta.Empty()) {
-                ++skips.sticky_skip_writes;
-            } else if (geometry_dirty) {
+            const bool color_mask_changed = pipeline->ColorOutputMask() != last_color_output_mask;
+            const bool layout_blocks =
+                state_tracker.DynamicStatePending() || color_mask_changed ||
+                (buffer_cache_runtime.AnyVertexRepacked() &&
+                 geom[VideoCommon::Dirty::VertexBuffers]) ||
+                state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology;
+            const bool targets_block = geom[VideoCommon::Dirty::RenderTargets] ||
+                                       texture_cache.RenderTargetsNeedPrepare();
+            const bool images_ready = pipeline->StickyImagesReady();
+            // Constant-buffer data only: same binds, pointers outside the written bytes.
+            const bool uniform_only = !taken_delta.Empty() && !taken_delta.overflowed &&
+                                      (taken_delta.binds[0] | taken_delta.binds[1] |
+                                       taken_delta.binds[2] | taken_delta.binds[3] |
+                                       taken_delta.binds[4]) == 0 &&
+                                      pipeline->ConstantDataKeepsBindings(taken_delta);
+            if (geometry_dirty) {
                 ++skips.sticky_skip_geometry;
             } else if (!cache_quiet || buffer_cache.any_buffer_uploaded) {
                 ++skips.sticky_skip_cache;
-            } else if (geom[VideoCommon::Dirty::RenderTargets] ||
-                       texture_cache.RenderTargetsNeedPrepare()) {
+            } else if (targets_block) {
                 ++skips.sticky_skip_targets;
-            } else if (state_tracker.DynamicStatePending() ||
-                       state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology) {
+            } else if (layout_blocks) {
                 ++skips.sticky_skip_dynamic;
-            } else if (!pipeline->StickyImagesReady()) {
+            } else if (!images_ready) {
                 ++skips.sticky_skip_images;
             } else if (texture_cache.FeedbackLoopActive() || outside_pass()) {
                 ++skips.sticky_skip_barrier;
+            } else if (!taken_delta.Empty() && !uniform_only) {
+                ++skips.sticky_skip_writes;
             } else {
                 // Marks depth written so a later feedback draw still barriers. A result means
                 // this draw itself needs that barrier, which also ends the render pass.
@@ -1164,15 +1229,22 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 UpdateOcarinaJitter();
                 if (texture_cache.FeedbackLoopActive() || outside_pass()) {
                     ++skips.sticky_skip_barrier;
-                } else if (state_tracker.DynamicStatePending()) {
+                } else if (state_tracker.DynamicStatePending() ||
+                           pipeline->ColorOutputMask() != last_color_output_mask) {
                     ++skips.sticky_skip_dynamic;
-                } else {
+                } else if (taken_delta.Empty()) {
                     sticky = true;
                     ++skips.sticky;
+                } else if (Profile::Scope scope{Profile::Zone::Configure};
+                           pipeline->ConfigureDelta(is_indexed, true, true)) {
+                    uniform_fast = true;
+                    ++skips.uniform_fast;
+                } else {
+                    ++skips.sticky_skip_writes;
                 }
             }
         }
-        if (!sticky) {
+        if (!sticky && !uniform_fast) {
             // Empty delta: no constant-buffer writes or rebinds since the previous draw.
             // CPU writes and buffer deletions do not bump the fast-draw serial.
             const bool neutral_only = Settings::values.fast_draw_neutral_regs.GetValue() &&
@@ -1300,7 +1372,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     if (fast_draw_on) {
         NoteResolvedDraw(pipeline, is_indexed, is_indirect, draw_serial, draw_map_serial);
-        const DrawPath timed = sticky ? DrawPath::Sticky : path;
+        const DrawPath timed = sticky || uniform_fast ? DrawPath::Sticky : path;
         const size_t index = static_cast<size_t>(timed);
         fast_draw_stats.prepare_ns[index] += Profile::Now() - fast_draw_start;
         ++fast_draw_stats.prepare_draws[index];
@@ -2736,6 +2808,10 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     {
         std::scoped_lock lock{buffer_cache.mutex};
         for (const auto& [addr, size] : sequences) {
+            if (buffer_cache.AbsorbRepeatedCpuWrite(addr, size)) {
+                ++fast_draw_stats.invalidation_repeat;
+                continue;
+            }
             buffer_cache.WriteMemory(addr, size);
         }
     }
@@ -3870,11 +3946,36 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     const bool emulated_mesh{pipeline != nullptr && pipeline->IsEmulatedMesh()};
     if (emulated_mesh) {
         state_tracker.InvalidateInputState();
-    } else if (Settings::values.fast_draw_sticky.GetValue() && !state_tracker.DynamicStatePending() &&
-               state_tracker.Topology() == maxwell3d->draw_manager.draw_state.topology) {
-        // Every flag this function reads is clear and the topology is already bound.
-        ++fast_draw_stats.dynamic_skipped;
-        return;
+    } else if (Settings::values.fast_draw_sticky.GetValue()) {
+        const bool color_mask_changed =
+            pipeline != nullptr && pipeline->ColorOutputMask() != last_color_output_mask;
+        const bool repacked = buffer_cache_runtime.AnyVertexRepacked() &&
+                              flags[VideoCommon::Dirty::VertexBuffers];
+        const bool topology_changed =
+            state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology;
+        if (!color_mask_changed && !repacked && !topology_changed &&
+            !state_tracker.DynamicStatePending()) {
+            // Colour write mask follows the fragment outputs, not only the register flags.
+            ++fast_draw_stats.dynamic_skipped;
+            return;
+        }
+        if (VideoCommon::Nx2Profile::Enabled()) {
+            fast_draw_stats.dynamic_mask += color_mask_changed ? 1 : 0;
+            fast_draw_stats.dynamic_topology += topology_changed ? 1 : 0;
+            auto& hits = fast_draw_stats.dynamic_flag_hits;
+            const auto bump = [&](u32 id) {
+                if (id < hits.size() && flags[id]) {
+                    ++hits[id];
+                }
+            };
+            bump(VideoCommon::Dirty::VertexBuffers);
+            bump(VideoCommon::Dirty::DepthBiasGlobal);
+            bump(VideoCommon::Dirty::RescaleViewports);
+            bump(VideoCommon::Dirty::RescaleScissors);
+            for (u32 id = Dirty::First; id < Dirty::Last; ++id) {
+                bump(id);
+            }
+        }
     }
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
     const bool topology_changed = !emulated_mesh && state_tracker.ChangePrimitiveTopology(topology);

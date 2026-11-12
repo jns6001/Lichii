@@ -1167,7 +1167,71 @@ bool GraphicsPipeline::StickyImagesReady() const noexcept {
            kept_scale_epoch == texture_cache.ScaleEpoch() && !DeltaImagesChange();
 }
 
-bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
+bool GraphicsPipeline::ConstantDataKeepsBindings(const VideoCommon::Nx2FastDraw::Delta& delta) const {
+    if (delta.overflowed || delta.num_writes == 0 ||
+        (delta.binds[0] | delta.binds[1] | delta.binds[2] | delta.binds[3] | delta.binds[4]) != 0) {
+        return false;
+    }
+    const auto overlaps = [&](u32 stage, u32 cbuf_index, u32 cbuf_offset) {
+        const auto& cbuf = maxwell3d->state.shader_stages[stage].const_buffers[cbuf_index];
+        if (!cbuf.enabled || cbuf.address == 0) {
+            return false;
+        }
+        constexpr u64 pointer_bytes = 16;
+        const GPUVAddr begin = cbuf.address + cbuf_offset;
+        for (u32 write = 0; write < delta.num_writes; ++write) {
+            if (delta.write_begin[write] < begin + pointer_bytes && begin < delta.write_end[write]) {
+                return true;
+            }
+        }
+        const auto device = gpu_memory->GpuToCpuAddress(begin);
+        if (!device) {
+            return false;
+        }
+        const DAddr device_end = *device + pointer_bytes;
+        for (u32 write = 0; write < delta.num_device_writes; ++write) {
+            if (delta.device_begin[write] < device_end && *device < delta.device_end[write]) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (size_t stage = 0; stage < stage_infos.size(); ++stage) {
+        if (!configured_stages[stage]) {
+            continue;
+        }
+        const auto& info = stage_infos[stage];
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
+                return false;
+            }
+        }
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset) ||
+                (desc.has_secondary &&
+                 overlaps(stage, desc.secondary_cbuf_index, desc.secondary_cbuf_offset))) {
+                return false;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only, bool skip_targets) {
+    if (skip_targets) {
+        // Caller proved the bindings and the targets. Image replay has to be usable before any
+        // bind, or the descriptor payload would not match the pipeline.
+        if (!(kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch() &&
+              !delta_descriptors_verify)) {
+            return false;
+        }
+        neutral_only = true;
+    }
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
@@ -1292,7 +1356,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
-    {
+    if (!skip_targets) {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};

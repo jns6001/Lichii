@@ -307,8 +307,10 @@ public:
             return true;
         }
         const auto& set = *flags;
+        // Vertex buffer addresses set VertexBuffers and are bound separately. A stride or
+        // enable change also sets VertexInput (the first word of the stream).
         if (set[VideoCommon::Dirty::RescaleViewports] || set[VideoCommon::Dirty::RescaleScissors] ||
-            set[VideoCommon::Dirty::DepthBiasGlobal] || set[VideoCommon::Dirty::VertexBuffers]) {
+            set[VideoCommon::Dirty::DepthBiasGlobal]) {
             return true;
         }
         for (std::size_t id = Dirty::First; id < Dirty::Last; ++id) {

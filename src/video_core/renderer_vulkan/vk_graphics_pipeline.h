@@ -344,7 +344,13 @@ public:
     /// can't be recorded, as for Configure.
     /// `neutral_only`: vertex and index buffers are not dirty. Skip resolving them again.
     /// Host binds, uniforms and image-descriptor replay still run.
-    bool ConfigureDelta(bool is_indexed, bool neutral_only = false);
+    /// `skip_targets`: images, render targets and storage pointers are unchanged. Replay
+    /// descriptors and bind uniforms only. False when image replay is not available, before
+    /// any bind.
+    bool ConfigureDelta(bool is_indexed, bool neutral_only = false, bool skip_targets = false);
+
+    /// True when `delta` does not cover a storage, texture-buffer or image-buffer pointer.
+    [[nodiscard]] bool ConstantDataKeepsBindings(const VideoCommon::Nx2FastDraw::Delta& delta) const;
 
     /// The next Configure keeps the views and samplers it resolves for delta draws. With
     /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.
