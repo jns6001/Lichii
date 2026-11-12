@@ -101,6 +101,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, cpu_clock, tr("CPU Clocks"),
            tr("Raises the clock the emulated CPU reports, which removes some FPS limiters.\n"
               "Weaker CPUs may see reduced performance, and certain games may behave improperly."));
+    INSERT(Settings, fast_guest_tick, tr("Cache guest tick scale"),
+           tr("Reuses the CPU clock and speed-limit scale for a few thousand guest timer reads "
+              "instead of looking the settings up on every read.\n"
+              "Breath of the Wild polls this timer while it waits for the GPU. The tick value "
+              "uses the same formula. Off by default."));
 
     INSERT(Settings, use_custom_cpu_ticks, QString(), QString());
     INSERT(Settings, cpu_ticks, tr("Custom CPU Ticks"),
@@ -319,6 +324,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Ensures data consistency between compute and memory operations.\nThis option fixes "
               "issues in games, but may degrade performance.\nUnreal Engine 4 games often see the "
               "most significant changes thereof."));
+    INSERT(Settings, gpu_fence_poll_us, tr("GPU fence poll (us)"),
+           tr("0 waits in the driver until the host GPU finishes the frame.\n"
+              "Any other value is how often, in microseconds, that wait gives up and checks the "
+              "GPU again. Use it when the driver only notices a finished frame on a coarse "
+              "timer. The guest still does not see the frame until the GPU has finished. "
+              "Off (0) by default."));
     INSERT(Settings, defer_gp_sync_drain, tr("Defer guest sync drains"),
            tr("With Sync Memory Operations, the GPU thread waits for the other GPU thread at "
               "every synced command list. In Breath of the Wild that wait is most of a second "

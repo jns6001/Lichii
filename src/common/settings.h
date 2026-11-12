@@ -282,6 +282,12 @@ struct Values {
                                               true,
                                               true};
 
+    // GetClockTicks scales the counter by the CPU clock and the speed limit. Breath of the Wild
+    // reads it millions of times a second while it spins for the GPU. On: those factors are
+    // reused for a few thousand reads instead of calling into settings each time. The value is
+    // the same formula. Off by default.
+    SwitchableSetting<bool> fast_guest_tick{linkage, false, "fast_guest_tick", Category::System};
+
     SwitchableSetting<bool> use_custom_cpu_ticks{linkage,
                                                  false,
                                                  "use_custom_cpu_ticks",
@@ -679,6 +685,14 @@ struct Values {
     // A list read from GPU-written or dirty memory still waits. Off by default.
     SwitchableSetting<bool> defer_gp_sync_drain{linkage, false, "defer_gp_sync_drain",
                                                 Category::RendererAdvanced};
+
+    // 0: the fencing thread blocks in vkWaitSemaphores until the host GPU reaches the tick.
+    // Any other value is a timeout in microseconds. The wait returns and the counter is read
+    // again, so a driver that only notices the semaphore on a coarse timer still sees it within
+    // this interval. The payload is not written any earlier than the GPU actually finishing.
+    SwitchableSetting<u32, true> gpu_fence_poll_us{linkage, 0, 0, 10000, "gpu_fence_poll_us",
+                                                   Category::RendererAdvanced,
+                                                   Specialization::Countable, true, true};
 
     SwitchableSetting<bool> renderer_force_max_clock{linkage, false, "force_max_clock",
                                                      Category::RendererAdvanced};

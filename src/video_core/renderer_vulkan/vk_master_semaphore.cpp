@@ -4,9 +4,14 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <ranges>
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
@@ -16,6 +21,38 @@
 namespace Vulkan {
 
 constexpr u64 FENCE_RESERVE_SIZE = 8;
+
+void NoteFenceWait(std::chrono::steady_clock::duration waited, u32 poll_us) {
+    static std::mutex mutex;
+    static std::vector<u64> samples_us;
+    static std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+    static u64 waits{};
+    std::scoped_lock lock{mutex};
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(waited).count();
+    samples_us.push_back(static_cast<u64>(us < 0 ? 0 : us));
+    ++waits;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds{10}) {
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - window).count();
+    std::ranges::sort(samples_us);
+    const auto at = [&](double fraction) {
+        if (samples_us.empty()) {
+            return 0.0;
+        }
+        const size_t index = static_cast<size_t>(fraction * static_cast<double>(samples_us.size() - 1));
+        return static_cast<double>(samples_us[index]);
+    };
+    LOG_INFO(Render_Vulkan,
+             "GPU fence wait per second: {:.0f} waits, p50 {:.0f} us, p99 {:.0f} us, max {:.0f} "
+             "us (poll {} us)",
+             static_cast<double>(waits) / seconds, at(0.50), at(0.99),
+             samples_us.empty() ? 0.0 : static_cast<double>(samples_us.back()), poll_us);
+    samples_us.clear();
+    waits = 0;
+    window = now;
+}
 
 MasterSemaphore::MasterSemaphore(const Device& device_) : device(device_) {
     if (!device.HasTimelineSemaphore()) {
@@ -105,15 +142,31 @@ void MasterSemaphore::Wait(u64 tick) {
         return;
     }
 
-    // If none of the above is hit, fallback to a regular wait
+    // If none of the above is hit, fallback to a regular wait. gpu_fence_poll_us bounds how long
+    // the driver may sit in that wait before we read the counter again: some drivers only notice
+    // a signaled timeline semaphore on a millisecond timer.
     const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::GpuWait};
+    const u32 poll_us = Settings::values.gpu_fence_poll_us.GetValue();
+    const auto wait_start = std::chrono::steady_clock::now();
     try {
-        while (!semaphore.Wait(tick)) {
+        if (poll_us == 0) {
+            while (!semaphore.Wait(tick)) {
+            }
+        } else {
+            const u64 timeout_ns = u64{poll_us} * 1000ULL;
+            while (semaphore.GetCounter() < tick) {
+                if (semaphore.Wait(tick, timeout_ns)) {
+                    break;
+                }
+            }
         }
     } catch (const vk::Exception& exception) {
         // The throw ends the process; say why first (a device loss reached nothing else here).
         LOG_CRITICAL(Render_Vulkan, "Waiting for GPU tick {} failed: {}", tick, exception.what());
         throw;
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        NoteFenceWait(std::chrono::steady_clock::now() - wait_start, poll_us);
     }
 
     Refresh();

@@ -254,7 +254,8 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
         const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE");
         return value == nullptr || value[0] != '0';
     }();
-    if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
+    const bool close_spin = ticks - m_last_cntpct < m_spin_ticks;
+    if (pause_spins && close_spin) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
         _mm_pause();
@@ -263,6 +264,10 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
 #endif
     }
     m_last_cntpct = ticks;
+    static const bool profile = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    if (profile) {
+        m_parent.m_system.CoreTiming().NoteGuestCntpct(close_spin);
+    }
     return ticks;
 }
 
