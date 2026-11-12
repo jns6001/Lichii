@@ -1095,6 +1095,21 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     if (!is_clear && skip_clean && !maxwell3d->dirty.flags[Dirty::RenderTargets] &&
         !RenderTargetsNeedPrepare()) {
         ++VideoCommon::Nx2FastDraw::g_rt_clean_skips;
+        // The draw still writes the targets: they must stay newer than any alias written since
+        // (SynchronizeAliases and JoinImages order copies by modification tick) and stay
+        // recently used, or the garbage collector can evict a target that is being drawn to.
+        const auto touch = [&](ImageViewId id) {
+            if (!VideoCommon::PreparesImage(slot_image_views, id)) {
+                return;
+            }
+            Image& image = slot_images[slot_image_views[id].image_id];
+            MarkModification(image);
+            lru_cache.Touch(image.lru_index, frame_tick);
+        };
+        for (const ImageViewId id : render_targets.color_buffer_ids) {
+            touch(id);
+        }
+        touch(render_targets.depth_buffer_id);
         return;
     }
     struct ClearingScope {
