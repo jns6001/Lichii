@@ -1192,7 +1192,11 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                        (scheduler.RenderPassHasStores() ||
                         texture_cache.SamplesRenderTarget(pipeline->DeltaViews()));
             };
-            const bool color_mask_changed = pipeline->ColorOutputMask() != last_color_output_mask;
+            // UpdateBlending re-records the colour write mask from the pipeline outputs only
+            // when EXT_extended_dynamic_state3 blending is on. No dirty flag marks that change.
+            const bool color_mask_changed =
+                device.IsExtExtendedDynamicState3BlendingSupported() &&
+                pipeline->ColorOutputMask() != last_color_output_mask;
             const bool layout_blocks =
                 state_tracker.DynamicStatePending() || color_mask_changed ||
                 (buffer_cache_runtime.AnyVertexRepacked() &&
@@ -1229,8 +1233,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 UpdateOcarinaJitter();
                 if (texture_cache.FeedbackLoopActive() || outside_pass()) {
                     ++skips.sticky_skip_barrier;
-                } else if (state_tracker.DynamicStatePending() ||
-                           pipeline->ColorOutputMask() != last_color_output_mask) {
+                } else if (state_tracker.DynamicStatePending() || color_mask_changed) {
                     ++skips.sticky_skip_dynamic;
                 } else if (taken_delta.Empty()) {
                     sticky = true;
@@ -3947,15 +3950,19 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     if (emulated_mesh) {
         state_tracker.InvalidateInputState();
     } else if (Settings::values.fast_draw_sticky.GetValue()) {
+        const u32 color_output_mask = pipeline != nullptr ? pipeline->ColorOutputMask() : ~0U;
         const bool color_mask_changed =
-            pipeline != nullptr && pipeline->ColorOutputMask() != last_color_output_mask;
+            device.IsExtExtendedDynamicState3BlendingSupported() &&
+            color_output_mask != last_color_output_mask;
         const bool repacked = buffer_cache_runtime.AnyVertexRepacked() &&
                               flags[VideoCommon::Dirty::VertexBuffers];
         const bool topology_changed =
             state_tracker.Topology() != maxwell3d->draw_manager.draw_state.topology;
         if (!color_mask_changed && !repacked && !topology_changed &&
             !state_tracker.DynamicStatePending()) {
-            // Colour write mask follows the fragment outputs, not only the register flags.
+            // Every flag this function reads is clear and the topology is already bound.
+            // UpdateBlending also re-records the colour write mask when the pipeline outputs
+            // other components, so a pipeline switch with a different output mask does not skip.
             ++fast_draw_stats.dynamic_skipped;
             return;
         }
