@@ -458,7 +458,9 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
                 channel_state->payload->dma_pusher.suspensions.load(std::memory_order_acquire);
             // snapshot_sync_entries copies only the entries the deferral parses without waiting.
             // The rest stay live reads. The full copy zero-fills the whole submission first.
-            const bool sync_only = Tegra::SnapshotSyncEntriesOnly();
+            // Switch 1 only: Switch 2 parses every entry from this copy (a refilled command ring
+            // read live is Mario Kart World's stale present).
+            const bool sync_only = !g_nx2_driver && Tegra::SnapshotSyncEntriesOnly();
             entries.submitted_words.clear();
             entries.submitted_offsets.clear();
             entries.submitted_offsets.reserve(entries.command_lists.size());
