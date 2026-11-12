@@ -35,6 +35,10 @@
 
 namespace Tegra {
 
+bool DeferGpSyncSnapshots() {
+    return Settings::values.defer_gp_sync_drain.GetValue();
+}
+
 void NoteGpSync(bool deferred) {
     struct Counts {
         u64 deferred{};
@@ -229,12 +233,14 @@ bool DmaPusher::Step() {
     const CommandListHeader& header = current_command;
     dma_state.dma_get = header.addr;
 
-    if (signal_sync && synced) {
+    SyncFenceState& sync_state = *sync_fence_state;
+    const u64 sync_target = sync_fence_target;
+    if (signal_sync && sync_state.done.load(std::memory_order_acquire) >= sync_target) {
         signal_sync = false;
-        synced = false;
-    } else if (signal_sync && !synced) {
+    } else if (signal_sync) {
         // The fence was queued in order. A list already copied at submit does not need it
         // before parsing; a live read of GPU-written or dirty memory still does.
+        // Switch 1 does not copy lists unless defer_gp_sync_drain asked for that copy.
         const bool defer = Settings::values.defer_gp_sync_drain.GetValue() &&
                            VideoCommon::GpuSplit::Get().Active();
         bool from_snapshot = false;
@@ -255,13 +261,17 @@ bool DmaPusher::Step() {
                 VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::GpSyncFence);
                 NoteGpSync(false);
             }
-            std::unique_lock lk(sync_mutex);
-            sync_cv.wait(lk, [this]() { return synced.load(); });
-            signal_sync = false;
-            synced = false;
+            std::unique_lock lk(sync_state.mutex);
+            sync_state.cv.wait(lk, [&sync_state, sync_target] {
+                return sync_state.done.load(std::memory_order_acquire) >= sync_target;
+            });
         } else {
             NoteGpSync(true);
         }
+        // Handled either way: a deferred entry must not leave signal_sync set, or the end of
+        // the submission would queue a spurious fence and the next submission's first entry
+        // would be treated as synced.
+        signal_sync = false;
     }
 
     if (header.size > 0) {
@@ -447,11 +457,17 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
-        const auto fence = [this] {
-            rasterizer->SignalFence([this]() {
-                std::scoped_lock lk(sync_mutex);
-                synced = true;
-                sync_cv.notify_all();
+        const u64 sequence = ++sync_fence_queued;
+        sync_fence_target = sequence;
+        const auto fence = [this, sequence] {
+            rasterizer->SignalFence([state = sync_fence_state, sequence]() {
+                {
+                    std::scoped_lock lk(state->mutex);
+                    if (state->done.load(std::memory_order_relaxed) < sequence) {
+                        state->done.store(sequence, std::memory_order_release);
+                    }
+                }
+                state->cv.notify_all();
             });
         };
         auto& split = VideoCommon::GpuSplit::Get();

@@ -440,16 +440,19 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
                 entries.submit_hashes.push_back(Tegra::HashPushbufferWords(words));
             }
         }
-        // The present returns before the GPU thread reaches this frame's work (nx2_gsv.h,
-        // frames ahead), and Mario Kart World then refills command memory it already
-        // submitted: the end of a frame ran with the next frame's present image as its render
-        // target, leaving an image three frames old to be shown. Keep the words as submitted.
-        // EDEN_NX2_PB_SNAPSHOT=0: execute from memory.
-        static const bool snapshot = [] {
-            const char* value = std::getenv("EDEN_NX2_PB_SNAPSHOT");
-            return value == nullptr || value[0] != '0';
-        }();
-        if (snapshot && channel_state->memory_manager && channel_state->payload) {
+    }
+    // The present returns before the GPU thread reaches this frame's work (nx2_gsv.h,
+    // frames ahead), and Mario Kart World then refills command memory it already
+    // submitted: the end of a frame ran with the next frame's present image as its render
+    // target, leaving an image three frames old to be shown. Keep the words as submitted.
+    // Switch 1 does not otherwise keep this copy, so defer_gp_sync_drain would treat every
+    // synced entry as a live read and drain. EDEN_NX2_PB_SNAPSHOT=0: execute from memory.
+    static const bool snapshot = [] {
+        const char* value = std::getenv("EDEN_NX2_PB_SNAPSHOT");
+        return value == nullptr || value[0] != '0';
+    }();
+    if ((g_nx2_driver || Tegra::DeferGpSyncSnapshots()) && snapshot &&
+        channel_state->memory_manager && channel_state->payload) {
             // Before the copy: a suspension during it must count as one after it.
             entries.snapshot_suspensions =
                 channel_state->payload->dma_pusher.suspensions.load(std::memory_order_acquire);
@@ -476,7 +479,6 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
                 }
                 offset += entry.size;
             }
-        }
     }
 
     auto& flags = params.flags;
