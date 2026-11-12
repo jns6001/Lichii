@@ -259,6 +259,9 @@ public:
     /// `keep_page_gpu_data`: download GPU-written bytes sharing the written pages first (false
     /// when the memory is going away).
     void WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data = true);
+    /// A repeated write to memory no cached buffer owns and no GPU write shares a page with.
+    /// Notes the uniform keep and returns true so the caller can skip WriteMemory.
+    [[nodiscard]] bool AbsorbRepeatedCpuWrite(DAddr device_addr, u64 size);
 
     void CachedWriteMemory(DAddr device_addr, u64 size);
 
@@ -535,6 +538,16 @@ public:
     /// buffer binds and data since the previous draw when it is a fast draw delta draw, else
     /// nullptr.
     void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
+    /// No buffer-cache write or buffer deletion since the previous draw. CPU writes do not
+    /// bump the fast-draw serial, so a neutral delta has to ask.
+    /// `covered`: constant-buffer device ranges this draw recorded. A write fully inside those,
+    /// and not on a vertex, index, storage or texture-buffer binding, does not count. Lost
+    /// writes and deletions still do.
+    [[nodiscard]] bool DrawUploadsQuiet(
+        const VideoCommon::Nx2FastDraw::Delta* covered = nullptr) const noexcept;
+    [[nodiscard]] std::span<const std::pair<DAddr, DAddr>> PendingUploadWrites() const noexcept {
+        return {uniform_keep.memory_writes.data(), uniform_keep.memory_writes.size()};
+    }
 
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
@@ -789,7 +802,9 @@ private:
     /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
     /// between the two draws wrote its range: no inline constant data, no rebind, no CPU write the
     /// caches were told about, no GPU write and no buffer deletion. Anything else in between ends
-    /// the delta chain.
+    /// the delta chain. The chain is recorded only on the split's back thread unless
+    /// fast_draw_reuse is on, and every macro ends it unless that setting is on and the macro is
+    /// interpreted or JIT-compiled. A Switch 1 profile therefore reports keeps of 0 until then.
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
     void NoteUniformWrite(DAddr device_addr, u64 size) {
@@ -841,6 +856,11 @@ private:
         }();
         if (forced >= 0) {
             return forced == 1;
+        }
+        // Switch 2 never copies every GPU write back (UsesNativeTiling). Switch 1 does, unless
+        // the setting says to copy only ranges the guest has already read (Preflushable).
+        if (!Settings::values.gpu_buffer_fence_downloads.GetValue()) {
+            return false;
         }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }

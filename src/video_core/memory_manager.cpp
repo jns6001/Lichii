@@ -557,6 +557,9 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     };
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(page_table[page_index]) << cpu_page_bits) + offset;
+        if (record_cached_devices) {
+            NoteCachedDeviceWrite(dev_addr_base, copy_amount);
+        }
         finish_reads(dev_addr_base, copy_amount);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
@@ -572,6 +575,9 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset;
+        if (record_cached_devices) {
+            NoteCachedDeviceWrite(dev_addr_base, copy_amount);
+        }
         finish_reads(dev_addr_base, copy_amount);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
@@ -604,7 +610,9 @@ void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buf
 }
 
 void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
+    record_cached_devices = true;
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    record_cached_devices = false;
     accumulator.Add(gpu_dest_addr, size);
 }
 
@@ -618,7 +626,9 @@ void MemoryManager::WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, s
         }
         return;
     }
+    record_cached_devices = true;
     WriteBlockImpl(gpu_dest_addr, words, size, VideoCommon::CacheType::None, true);
+    record_cached_devices = false;
     // The accumulator merges word by word differently from one range: keep its ranges.
     for (std::size_t i = 0; i < count; ++i) {
         accumulator.Add(gpu_dest_addr + i * sizeof(u32), sizeof(u32));
@@ -1054,7 +1064,17 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
 }
 
 void MemoryManager::FlushCaching() {
-    // Flush from the invalidate accumulator
+    // The copies already knew the device addresses. Translating the GPU addresses again was
+    // most of the per-draw invalidation. Deferred inline-to-memory writes only reach the
+    // accumulator, so a recorded constant-buffer write must not discard them.
+    if (!cached_device_writes.empty() && !accumulated_untracked) {
+        rasterizer->InnerInvalidation(cached_device_writes);
+        cached_device_writes.clear();
+        static_cast<void>(accumulator.InvalidateAll([](GPUVAddr, size_t) {}));
+        return;
+    }
+    cached_device_writes.clear();
+    accumulated_untracked = false;
     if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);
     })) {

@@ -107,6 +107,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
 // On for Switch 2 titles with the 3D and compute engines' macros on the front, against copies of
 // the registers they read (Maxwell3D and KeplerCompute Front*), which sends the writes they make.
 // EDEN_NX2_SPLIT=1 keeps the macros on the back; EDEN_NX2_SPLIT=0 runs everything on one thread.
+// Switch 1 stays one thread unless Settings::maxwell_gpu_thread_split is on. Its macros are the
+// Fermi engine, not the Turing front mirror, so they stay on the back and acquires drain.
 class GpuSplit {
 public:
     static GpuSplit& Get() {

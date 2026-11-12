@@ -1347,6 +1347,34 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
     macro_file.write(reinterpret_cast<const char*>(code.data()), code.size_bytes());
 }
 
+namespace {
+
+// HLE handlers write Maxwell registers themselves, so the whole call has to end fast-draw
+// reuse. The interpreter and the x86 JIT only change that state by sending methods through
+// Maxwell3D::CallMethod, which breaks reuse when the write is one a later draw must see.
+bool FastDrawReuseKeepsMacro(const AnyCachedMacro& program) {
+    if (!Settings::values.fast_draw_reuse.GetValue()) {
+        return false;
+    }
+    return std::holds_alternative<MacroInterpreterImpl>(program) ||
+           std::holds_alternative<std::unique_ptr<DynamicCachedMacro>>(program);
+}
+
+/// The break id in the fast-draw log is this macro's code offset, not a Maxwell register.
+/// Draw-only handlers issue the draw themselves and put the attribute replacements back before
+/// returning. fast_draw_neutral_regs lets those chain; shader binds and clears still break.
+bool DrawOnlyHleSkipsBreak(const AnyCachedMacro& program) {
+    if (!Settings::values.fast_draw_neutral_regs.GetValue()) {
+        return false;
+    }
+    return std::holds_alternative<HLE_DrawArraysIndirect>(program) ||
+           std::holds_alternative<HLE_DrawIndexedIndirect>(program) ||
+           std::holds_alternative<HLE_MultiDrawIndexedIndirectCount>(program) ||
+           std::holds_alternative<HLE_DrawIndirectByteCount>(program);
+}
+
+} // namespace
+
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                           std::span<const u32> parameters) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
@@ -1631,9 +1659,15 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     // HLE programs write registers directly, without the 3D engine's fast draw breaks.
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
-        FastDraw::Break(FastDraw::Reason::Method, method);
+        const bool keep = FastDrawReuseKeepsMacro(it->second.program) ||
+                          DrawOnlyHleSkipsBreak(it->second.program);
+        if (!keep) {
+            FastDraw::Break(FastDraw::Reason::Method, method);
+        }
         execute_variant(it->second.program);
-        FastDraw::Break(FastDraw::Reason::Method, method);
+        if (!keep) {
+            FastDraw::Break(FastDraw::Reason::Method, method);
+        }
         return;
     }
 
@@ -1674,9 +1708,14 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         ci.program = Compile(system, maxwell3d, code);
     }
 
-    FastDraw::Break(FastDraw::Reason::Method, method);
+    const bool keep = FastDrawReuseKeepsMacro(ci.program) || DrawOnlyHleSkipsBreak(ci.program);
+    if (!keep) {
+        FastDraw::Break(FastDraw::Reason::Method, method);
+    }
     execute_variant(ci.program);
-    FastDraw::Break(FastDraw::Reason::Method, method);
+    if (!keep) {
+        FastDraw::Break(FastDraw::Reason::Method, method);
+    }
     if (Settings::values.dump_macros) {
         Dump(ci.hash, code, !std::holds_alternative<std::monostate>(ci.program));
     }

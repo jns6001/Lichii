@@ -1162,12 +1162,95 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
+bool GraphicsPipeline::StickyImagesReady() const noexcept {
+    return kept_images_valid && delta_views_valid &&
+           kept_scale_epoch == texture_cache.ScaleEpoch() && !DeltaImagesChange();
+}
+
+bool GraphicsPipeline::ConstantDataKeepsBindings(const VideoCommon::Nx2FastDraw::Delta& delta) const {
+    if (delta.overflowed || delta.num_writes == 0 ||
+        (delta.binds[0] | delta.binds[1] | delta.binds[2] | delta.binds[3] | delta.binds[4]) != 0) {
+        return false;
+    }
+    const auto overlaps = [&](u32 stage, u32 cbuf_index, u32 cbuf_offset) {
+        const auto& cbuf = maxwell3d->state.shader_stages[stage].const_buffers[cbuf_index];
+        if (!cbuf.enabled || cbuf.address == 0) {
+            return false;
+        }
+        constexpr u64 pointer_bytes = 16;
+        const GPUVAddr begin = cbuf.address + cbuf_offset;
+        for (u32 write = 0; write < delta.num_writes; ++write) {
+            if (delta.write_begin[write] < begin + pointer_bytes && begin < delta.write_end[write]) {
+                return true;
+            }
+        }
+        const auto device = gpu_memory->GpuToCpuAddress(begin);
+        if (!device) {
+            return false;
+        }
+        const DAddr device_end = *device + pointer_bytes;
+        for (u32 write = 0; write < delta.num_device_writes; ++write) {
+            if (delta.device_begin[write] < device_end && *device < delta.device_end[write]) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (size_t stage = 0; stage < stage_infos.size(); ++stage) {
+        if (!configured_stages[stage]) {
+            continue;
+        }
+        const auto& info = stage_infos[stage];
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            // A table pointer lives at cbuf_offset. The storage address is an entry outside
+            // the constant buffer, which the overlap check does not see.
+            if (desc.indirect_offset != ~0U || overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
+                return false;
+            }
+        }
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset) ||
+                (desc.has_secondary &&
+                 overlaps(stage, desc.secondary_cbuf_index, desc.secondary_cbuf_offset))) {
+                return false;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only, bool skip_targets) {
+    if (skip_targets) {
+        // Caller proved the bindings and the targets. Image replay has to be usable before any
+        // bind, or the descriptor payload would not match the pipeline.
+        if (!(kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch() &&
+              !delta_descriptors_verify)) {
+            return false;
+        }
+        neutral_only = true;
+    }
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
+    // A neutral draw (padding / vertex-id-base only, vertex buffers clean) still pushes
+    // uniforms and storage descriptors: the queue is rebuilt every draw. It does not walk
+    // the geometry cache again. Image descriptors replay when the previous draw kept them;
+    // otherwise this falls back to a normal delta configure.
+    const bool replay_images_now =
+        neutral_only && kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch();
+    if (neutral_only && !replay_images_now) {
+        neutral_only = false;
+    }
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
-    {
+    // Storage pointers live in constant buffers. An empty delta did not rewrite them, so the
+    // bindings from the previous draw are still the ones BindHostStageBuffers emits. Unbinding
+    // here would drop those entries from this draw's descriptor payload.
+    if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (!configured_stages[stage]) {
@@ -1184,8 +1267,10 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
             }
         }
     }
-    {
+    if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        // Vertex state sticks for the rest of this render pass. A neutral draw did not dirty
+        // it and the buffer cache saw no write, so the binds the previous draw recorded stand.
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
@@ -1273,7 +1358,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
-    {
+    if (!skip_targets) {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};

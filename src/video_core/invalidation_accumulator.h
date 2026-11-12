@@ -38,6 +38,11 @@ public:
         }
     }
 
+    /// True when FlushCaching would run the callback. Address 0 is the empty sentinel.
+    [[nodiscard]] bool Pending() const noexcept {
+        return start_address > 0;
+    }
+
     template <typename F>
     [[nodiscard]] bool InvalidateAll(F&& f) noexcept {
         if (start_address > 0) {

@@ -1157,6 +1157,29 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
 }
 
 template <class P>
+bool TextureCache<P>::RenderTargetsNeedPrepare() const noexcept {
+    const auto needs = [&](ImageViewId id) {
+        if (!VideoCommon::PreparesImage(slot_image_views, id)) {
+            return false;
+        }
+        const auto& image = slot_images[slot_image_views[id].image_id];
+        constexpr auto heavy = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                               ImageFlagBits::SparseTiles | ImageFlagBits::UnwrittenSparse |
+                               ImageFlagBits::Unbacked | ImageFlagBits::IsDecoding;
+        // A download clears GpuModified. The next use as a target has to prepare it again
+        // so the mark, and any re-upload, happen before the draw.
+        return VideoCommon::SamplingChangesImage(image) || True(image.flags & heavy) ||
+               False(image.flags & ImageFlagBits::GpuModified);
+    };
+    for (const ImageViewId id : render_targets.color_buffer_ids) {
+        if (needs(id)) {
+            return true;
+        }
+    }
+    return needs(render_targets.depth_buffer_id);
+}
+
+template <class P>
 typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
     if (last_framebuffer_id && last_framebuffer_serial == render_targets_serial) {
         return &slot_framebuffers[last_framebuffer_id];

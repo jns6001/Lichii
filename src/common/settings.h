@@ -739,6 +739,65 @@ struct Values {
                                                   "use_reactive_flushing",
                                                   Category::RendererAdvanced};
 
+    // Switch 1 / Maxwell only. The split already used for Switch 2 stays as it is.
+    // Off: one GPU thread (today). On: command parsing on the GPU thread, engine methods
+    // on a second thread. Fermi macros stay on that second thread, and semaphore acquires
+    // wait for it. Does not start while GPU accuracy is Accurate or DMA reads are safe,
+    // because those flush caches the front thread must not touch. EDEN_NX2_SPLIT=0 forces off.
+    SwitchableSetting<bool> maxwell_gpu_thread_split{linkage, false, "maxwell_gpu_thread_split",
+                                                     Category::RendererAdvanced};
+
+    // Off: fast draws (and the uniform-buffer keeps that ride on them) are recorded only on
+    // the Switch 2 split's back thread, and every macro ends the chain. On: the single GPU
+    // thread may reuse an unchanged draw, and interpreted / JIT macros no longer end the
+    // chain (they send methods through CallMethod, which still breaks it when state changes).
+    // High-level macro handlers still end it. Can show stale textures if a macro's effect is
+    // not a method send.
+    SwitchableSetting<bool> fast_draw_reuse{linkage, false, "fast_draw_reuse",
+                                            Category::RendererAdvanced};
+
+    // BotW breaks fast-draw reuse on every draw by writing SET_VERTEX_ID_BASE (method 0x446,
+    // stored and never read) and the unused transform-feedback padding words (0x183, 0x1a2,
+    // the hole between 0x400 and 0x700). On: those writes do not end the chain, and a draw
+    // whose textures and vertex buffers did not change replays the previous descriptors
+    // instead of resolving images and rebinding storage again.
+    SwitchableSetting<bool> fast_draw_neutral_regs{linkage, false, "fast_draw_neutral_regs",
+                                                   Category::RendererAdvanced};
+
+    // A fast-draw delta whose constant buffers, vertex buffers, images and dynamic state did
+    // not change still walked configure, uniform binds, render targets and dynamic state
+    // (~0.9 µs, almost a full draw). On: that draw records only the draw call. Vulkan pipeline,
+    // descriptor, vertex and dynamic state stick for the render pass. Off by default.
+    SwitchableSetting<bool> fast_draw_sticky{linkage, false, "fast_draw_sticky",
+                                             Category::RendererAdvanced};
+
+    // Uniform keeps otherwise run only on a fast-draw delta. On: a full draw also reuses the
+    // previous upload when this draw's inline writes and tracked memory writes missed that
+    // range. A store the buffer cache was not told about (an untracked CPU write) is missed.
+    SwitchableSetting<bool> uniform_keep_full_draws{linkage, false, "uniform_keep_full_draws",
+                                                    Category::RendererAdvanced};
+
+    // 0: Switch 1 submits every 4096 draws (128 on MoltenVK), Switch 2 keeps its own budget.
+    // Any other value is the Switch 1 draw count between Vulkan submissions, rounded up to
+    // a multiple of 32. Smaller values let the host GPU start the frame while the GPU thread
+    // is still recording it. EDEN_NX2_FLUSH_DRAWS still applies when this is 0.
+    SwitchableSetting<u32, true> vulkan_flush_draws{linkage,
+                                                    0,
+                                                    0,
+                                                    16384,
+                                                    "vulkan_flush_draws",
+                                                    Category::RendererAdvanced,
+                                                    Specialization::Countable,
+                                                    true,
+                                                    true};
+
+    // Switch 1 copies every GPU-written buffer range back to guest memory at the next fence
+    // (the "buffer downloads" line). Off copies back only ranges the guest CPU has already
+    // read, which is what Switch 2 does. A game that reads a GPU buffer without that fault
+    // sees stale data. EDEN_NX2_BUFFER_DOWNLOADS=0/1 overrides this.
+    SwitchableSetting<bool> gpu_buffer_fence_downloads{linkage, true, "gpu_buffer_fence_downloads",
+                                                       Category::RendererAdvanced};
+
     SwitchableSetting<bool> barrier_feedback_loops{linkage, true, "barrier_feedback_loops",
                                                    Category::RendererAdvanced};
 

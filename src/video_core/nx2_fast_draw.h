@@ -130,9 +130,13 @@ struct Delta {
     std::array<DAddr, MaxWrites> device_begin{};
     std::array<DAddr, MaxWrites> device_end{};
     u32 num_device_writes{};
+    /// A write was not recorded: the list is full, or a texture/sampler header write returned
+    /// before noting the range. Uniform keeps must not trust this delta.
+    bool overflowed{};
 
     [[nodiscard]] bool Empty() const {
-        return num_writes == 0 && (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
+        return !overflowed && num_writes == 0 &&
+               (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
     }
 
     /// Whether data written reaches [address, address + size), whose device memory is spans: at
@@ -184,6 +188,7 @@ inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
     }
     Delta& delta = g_delta;
     if (!AppendRange(delta.write_begin, delta.write_end, delta.num_writes, begin, end)) {
+        delta.overflowed = true;
         Break(Reason::DeltaOverflow);
     }
 }
@@ -195,6 +200,7 @@ inline void NoteDeviceData(DAddr begin, DAddr end) {
     }
     Delta& delta = g_delta;
     if (!AppendRange(delta.device_begin, delta.device_end, delta.num_device_writes, begin, end)) {
+        delta.overflowed = true;
         Break(Reason::DeltaOverflow);
     }
 }

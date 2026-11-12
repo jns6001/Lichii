@@ -406,6 +406,44 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
         Settings, use_reactive_flushing, tr("Enable Reactive Flushing"),
         tr("Uses reactive flushing instead of predictive flushing, allowing more accurate memory "
            "syncing."));
+    INSERT(Settings, maxwell_gpu_thread_split, tr("Maxwell GPU thread split"),
+           tr("Switch 1 only. Runs engine method processing on a second thread while the GPU "
+              "thread parses commands.\n"
+              "Does nothing while GPU accuracy is Accurate or DMA accuracy is Safe, and nothing "
+              "for Switch 2 titles (they already split).\n"
+              "Off by default. EDEN_NX2_SPLIT=0 forces it off."));
+    INSERT(Settings, fast_draw_reuse, tr("Reuse unchanged draw state"),
+           tr("Keeps draw setup, including uniform buffers whose bytes have not changed, across "
+              "draws on the single GPU thread.\n"
+              "Off by default: that reuse previously ran only on the Switch 2 split, and every "
+              "macro ended it. Can render stale textures if a macro changes state without a "
+              "method write."));
+    INSERT(Settings, fast_draw_neutral_regs, tr("Ignore per-draw padding writes"),
+           tr("Breath of the Wild writes SET_VERTEX_ID_BASE and unused transform-feedback "
+              "words before almost every draw, and its draw macros were ending fast-draw "
+              "reuse under those same numbers.\n"
+              "On: neither forces a full setup. A draw whose vertex buffers also stayed put, "
+              "and whose buffers the CPU did not write, replays the previous descriptors."));
+    INSERT(Settings, fast_draw_sticky, tr("Record unchanged draws only"),
+           tr("A draw whose pipeline, images and dynamic state match the previous one records "
+              "only the draw call. Constant-buffer byte changes stream the new uniforms and "
+              "skip the rest of setup when the bindings themselves did not change.\n"
+              "Off by default. Needs \"Reuse unchanged draw state\". A texture upload, a "
+              "feedback barrier or a real state change still runs full setup."));
+    INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
+           tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
+              "inline writes and tracked memory writes did not touch that range.\n"
+              "Off by default. Misses a store into uniform memory the buffer cache is not "
+              "watching."));
+    INSERT(Settings, vulkan_flush_draws, tr("Vulkan submit interval (draws)"),
+           tr("Switch 1 only. 0 keeps the built-in interval (4096 draws, 128 on MoltenVK).\n"
+              "A smaller interval submits the frame while the GPU thread is still building it, "
+              "so the host GPU can start sooner. Rounded up to a multiple of 32."));
+    INSERT(Settings, gpu_buffer_fence_downloads, tr("Download GPU buffers at fences"),
+           tr("Switch 1 copies every buffer the GPU wrote back to guest memory when a fence "
+              "completes.\n"
+              "Off does not. A later CPU read of that memory flushes it on demand, instead of "
+              "marking the page and copying it again at every fence."));
     INSERT(Settings, use_video_framerate, tr("Sync to framerate of video playback"),
            tr("Run the game at normal speed during video playback, even when the framerate is "
               "unlocked."));

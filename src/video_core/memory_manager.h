@@ -197,10 +197,17 @@ public:
 
     void FlushCaching();
 
+    /// FlushCaching would invalidate at least one range.
+    [[nodiscard]] bool InvalidationPending() const noexcept {
+        return accumulator.Pending();
+    }
+
     /// Leaves the caches' invalidation of a range already written for the next FlushCaching
     /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
     void AccumulateInvalidation(GPUVAddr gpu_addr, std::size_t size) {
         accumulator.Add(gpu_addr, size);
+        // No device address was recorded for this one: FlushCaching must translate.
+        accumulated_untracked = true;
     }
 
     const u8* GetSpan(const GPUVAddr src_addr, const std::size_t size) const;
@@ -308,6 +315,22 @@ private:
 
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
+    /// Device addresses of WriteBlockCached, recorded while the bytes are copied so FlushCaching
+    /// does not translate the GPU addresses again.
+    bool record_cached_devices{};
+    /// The accumulator holds a range cached_device_writes does not (AccumulateInvalidation).
+    bool accumulated_untracked{};
+    std::vector<std::pair<DAddr, size_t>> cached_device_writes;
+    void NoteCachedDeviceWrite(DAddr addr, size_t size) {
+        if (!cached_device_writes.empty()) {
+            auto& last = cached_device_writes.back();
+            if (last.first + last.second == addr) {
+                last.second += size;
+                return;
+            }
+        }
+        cached_device_writes.emplace_back(addr, size);
+    }
 
     static std::atomic<size_t> unique_identifier_generator;
 

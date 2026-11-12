@@ -222,6 +222,31 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 }
 
 template <class P>
+bool BufferCache<P>::AbsorbRepeatedCpuWrite(DAddr device_addr, u64 size) {
+    const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    // IsRegionCpuModified is true when any page is marked. A write that also touches a clean
+    // page must still run MarkRegionAsCpuModified for that page. The read-check path and a
+    // registered buffer stay on WriteMemory.
+    if (!early_landed.empty() ||
+        gpu_modified_ranges.Intersects(page_begin, page_end - page_begin) ||
+        IsRegionRegistered(device_addr, size)) {
+        return false;
+    }
+    for (DAddr page = page_begin; page < page_end; page += DEVICE_PAGESIZE) {
+        const DAddr begin = (std::max)(page, device_addr);
+        const DAddr end = (std::min)(page + DEVICE_PAGESIZE, device_addr + size);
+        if (!memory_tracker.IsRegionCpuModified(begin, end - begin)) {
+            return false;
+        }
+    }
+    Nx2NoteListHostWrite(device_addr, size);
+    NoteUniformWrite(device_addr, size);
+    MarkVertexBuffersStale(device_addr, size);
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
     NoteUniformWrite(device_addr, size);
@@ -374,8 +399,10 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         area->preemtive = false;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
-    // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // instead keep read traps and flush on demand. The same for Switch 1 when fence downloads
+    // are off: the first read flushes on demand and does not mark the page.
+    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                          Settings::values.gpu_buffer_fence_downloads.GetValue();
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
@@ -1684,6 +1711,83 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 }
 
 template <class P>
+bool BufferCache<P>::DrawUploadsQuiet(const VideoCommon::Nx2FastDraw::Delta* covered) const noexcept {
+    const UniformKeep& keep = uniform_keep;
+    if (keep.memory_writes_lost || keep.draw_deletions != buffer_deletions) {
+        return false;
+    }
+    if (covered == nullptr || keep.memory_writes.empty()) {
+        return keep.memory_writes.empty();
+    }
+    const auto covered_by_delta = [&](DAddr begin, DAddr end) {
+        std::array<std::pair<DAddr, DAddr>, VideoCommon::Nx2FastDraw::Delta::MaxWrites> pieces;
+        u32 count = 0;
+        for (u32 write = 0; write < covered->num_device_writes; ++write) {
+            const DAddr piece_begin = covered->device_begin[write];
+            const DAddr piece_end = covered->device_end[write];
+            if (piece_begin < end && begin < piece_end) {
+                pieces[count++] = {(std::max)(piece_begin, begin), (std::min)(piece_end, end)};
+            }
+        }
+        if (count == 0) {
+            return false;
+        }
+        std::sort(pieces.begin(), pieces.begin() + count);
+        DAddr cursor = begin;
+        for (u32 piece = 0; piece < count; ++piece) {
+            if (pieces[piece].first > cursor) {
+                return false;
+            }
+            cursor = (std::max)(cursor, pieces[piece].second);
+            if (cursor >= end) {
+                return true;
+            }
+        }
+        return cursor >= end;
+    };
+    const auto hits_binding = [&](DAddr begin, DAddr end, DAddr addr, u64 size) {
+        return size != 0 && addr != 0 && begin < addr + size && addr < end;
+    };
+    for (const auto [begin, end] : keep.memory_writes) {
+        if (!covered_by_delta(begin, end)) {
+            return false;
+        }
+        u32 mask = enabled_vertex_buffers_mask;
+        while (mask != 0) {
+            const u32 index = std::countr_zero(mask);
+            mask &= mask - 1;
+            const Binding& binding = v_buffer[index];
+            if (hits_binding(begin, end, binding.device_addr, binding.size)) {
+                return false;
+            }
+        }
+        if (hits_binding(begin, end, channel_state->index_buffer.device_addr,
+                         channel_state->index_buffer.size)) {
+            return false;
+        }
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            for (u64 storage = channel_state->enabled_storage_buffers[stage]; storage != 0;
+                 storage &= storage - 1) {
+                const u32 index = static_cast<u32>(std::countr_zero(storage));
+                const Binding& binding = channel_state->storage_buffers[stage][index];
+                if (hits_binding(begin, end, binding.device_addr, binding.size)) {
+                    return false;
+                }
+            }
+            for (u32 texture = channel_state->enabled_texture_buffers[stage]; texture != 0;
+                 texture &= texture - 1) {
+                const u32 index = static_cast<u32>(std::countr_zero(texture));
+                const Binding& binding = channel_state->texture_buffers[stage][index];
+                if (hits_binding(begin, end, binding.device_addr, binding.size)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     UniformKeep& keep = uniform_keep;
     const bool unwritten = !keep.memory_writes_lost && keep.draw_deletions == buffer_deletions;
@@ -1691,7 +1795,7 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     keep.candidates = {};
     keep.writes.clear();
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
-    const bool usable = delta != nullptr && unwritten;
+    const bool usable = delta != nullptr && unwritten && !delta->overflowed;
     if (usable) {
         keep.writes.insert(keep.writes.end(), keep.memory_writes.begin(),
                            keep.memory_writes.end());

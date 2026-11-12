@@ -296,6 +296,31 @@ public:
         return has_changed;
     }
 
+    [[nodiscard]] Maxwell::PrimitiveTopology Topology() const noexcept {
+        return current_topology;
+    }
+
+    /// A dynamic-state flag UpdateDynamicStates would act on is set, or stencil was invalidated.
+    /// Does not clear the flags.
+    [[nodiscard]] bool DynamicStatePending() const noexcept {
+        if (stencil_reset) {
+            return true;
+        }
+        const auto& set = *flags;
+        // Vertex buffer addresses set VertexBuffers and are bound separately. A stride or
+        // enable change also sets VertexInput (the first word of the stream).
+        if (set[VideoCommon::Dirty::RescaleViewports] || set[VideoCommon::Dirty::RescaleScissors] ||
+            set[VideoCommon::Dirty::DepthBiasGlobal]) {
+            return true;
+        }
+        for (std::size_t id = Dirty::First; id < Dirty::Last; ++id) {
+            if (set[id]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void SetupTables(Tegra::Control::ChannelState& channel_state);
 
     void ChangeChannel(Tegra::Control::ChannelState& channel_state);
