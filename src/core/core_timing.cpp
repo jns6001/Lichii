@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
@@ -320,16 +322,72 @@ void CoreTiming::ResetTicks() {
 
 u64 CoreTiming::GetClockTicks() const {
     u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::g_wall_clock.CPUTickToGuestCNTPCT(cpu_ticks);
-    if (const u32 target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
-        target != CPU_CLOCK_BASE_MHZ) {
+    // fast_guest_tick: the scale is what the settings said a few thousand reads ago. The
+    // arithmetic is the one below. GetValue on every read is what a timer-poll loop spends.
+    static thread_local u32 sample{};
+    static thread_local bool fast{};
+    static thread_local u32 cached_target{CPU_CLOCK_BASE_MHZ};
+    static thread_local bool cached_sync{};
+    static thread_local f64 cached_speed{1.0};
+    if ((sample++ & 4095) == 0) {
+        fast = Settings::values.fast_guest_tick.GetValue();
+        if (fast) {
+            cached_target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
+            cached_sync = Settings::values.sync_core_speed.GetValue();
+            cached_speed = f64(Settings::SpeedLimit()) * 0.01;
+        }
+    }
+    const u32 target = fast ? cached_target : CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
+    const bool sync = fast ? cached_sync : Settings::values.sync_core_speed.GetValue();
+    if (target != CPU_CLOCK_BASE_MHZ) {
         fres = fres * target / CPU_CLOCK_BASE_MHZ;
     }
-    if (::Settings::values.sync_core_speed.GetValue()) {
-        auto const ticks = f64(fres);
-        auto const speed_limit = f64(Settings::SpeedLimit()) * 0.01;
-        return u64(ticks / speed_limit);
+    if (sync) {
+        const f64 speed_limit = fast ? cached_speed : f64(Settings::SpeedLimit()) * 0.01;
+        return u64(f64(fres) / speed_limit);
     }
     return fres;
+}
+
+void CoreTiming::NoteGuestCntpct(bool close_spin) const {
+    static const bool profile = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    if (!profile) {
+        return;
+    }
+    static std::atomic<u64> reads{};
+    static std::atomic<u64> spins{};
+    static std::atomic<u64> window_ns{};
+    if (window_ns.load(std::memory_order_relaxed) == 0) {
+        window_ns.store(static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch().count()),
+                        std::memory_order_relaxed);
+    }
+    const u64 n_now = reads.fetch_add(1, std::memory_order_relaxed);
+    if (close_spin) {
+        spins.fetch_add(1, std::memory_order_relaxed);
+    }
+    // steady_clock on every read would dominate the poll this is measuring.
+    if ((n_now & 0x3FFFF) != 0) {
+        return;
+    }
+    const u64 now = static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch().count());
+    u64 start = window_ns.load(std::memory_order_relaxed);
+    if (start == 0) {
+        window_ns.compare_exchange_strong(start, now, std::memory_order_relaxed);
+        return;
+    }
+    if (now - start < 10'000'000'000ULL) {
+        return;
+    }
+    if (!window_ns.compare_exchange_strong(start, now, std::memory_order_relaxed)) {
+        return;
+    }
+    const u64 n = reads.exchange(0, std::memory_order_relaxed);
+    const u64 s = spins.exchange(0, std::memory_order_relaxed);
+    const double seconds = static_cast<double>(now - start) / 1e9;
+    LOG_INFO(Core_Timing,
+             "Guest tick per second: {:.0f} reads, {:.0f} close spins (fast_guest_tick caches the "
+             "clock scale)",
+             static_cast<double>(n) / seconds, static_cast<double>(s) / seconds);
 }
 
 u64 CoreTiming::GetGPUTicks() const {

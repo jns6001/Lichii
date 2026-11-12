@@ -10,6 +10,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <vector>
@@ -131,7 +134,29 @@ struct CommandList final {
     /// that waited behind one, reads memory instead: games write the commands it runs before they
     /// release the acquire.
     u64 snapshot_suspensions = 0;
+
+    /// submitted_offsets entry for a command list that was not copied.
+    static constexpr u32 NoSnapshot = std::numeric_limits<u32>::max();
+
+    /// True when entry `index` has words in submitted_words. A sync-only snapshot leaves the
+    /// other entries as NoSnapshot, and those are parsed from memory.
+    [[nodiscard]] bool HasSubmittedEntry(size_t index) const noexcept {
+        if (index >= submitted_offsets.size() || index >= command_lists.size()) {
+            return false;
+        }
+        const u32 offset = submitted_offsets[index];
+        if (offset == NoSnapshot) {
+            return false;
+        }
+        return u64{offset} + command_lists[index].size <= submitted_words.size();
+    }
 };
+
+/// True when Switch 1 submissions copy only the entries whose sync bit is set.
+[[nodiscard]] bool SnapshotSyncEntriesOnly();
+
+/// True when Switch 1 submissions should keep a submit-time copy (defer_gp_sync_drain).
+[[nodiscard]] bool DeferGpSyncSnapshots();
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
 inline u64 HashPushbufferWords(std::span<const u32> words) {
@@ -322,6 +347,19 @@ public:
     bool dma_increment_once = false;
     bool signal_sync = false;
     std::atomic<bool> synced{false};
+
+    /// GP sync fences, numbered: with defer_gp_sync_drain several can be in flight, so a single
+    /// "synced" flag set by an older fence would release a wait meant for a newer one. Shared
+    /// with the fence callbacks so one that fires after this channel is gone touches no freed
+    /// memory.
+    struct SyncFenceState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::atomic<u64> done{0};
+    };
+    std::shared_ptr<SyncFenceState> sync_fence_state = std::make_shared<SyncFenceState>();
+    u64 sync_fence_queued{}; ///< Front: number of the last fence queued
+    u64 sync_fence_target{}; ///< Front: the fence the entry parsed next waits for
 };
 
 } // namespace Tegra

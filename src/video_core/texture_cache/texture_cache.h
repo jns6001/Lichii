@@ -1085,6 +1085,35 @@ bool TextureCache<P>::RescaleRenderTargets() {
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
+    // The target set is unchanged and nothing is waiting to upload. Preparing still walked every
+    // colour and depth image (~30 ms/s in BotW). A lost GPU-modified mark still prepares.
+    static u32 clean_sample{};
+    static bool skip_clean{};
+    if ((clean_sample++ & 31) == 0) {
+        skip_clean = Settings::values.skip_clean_render_targets.GetValue();
+    }
+    if (!is_clear && skip_clean && !maxwell3d->dirty.flags[Dirty::RenderTargets] &&
+        !RenderTargetsNeedPrepare()) {
+        // Checked every draw: a CPU write (CpuModified), a newer alias or a sparse state change
+        // reaches a target without a download, so an epoch of downloads alone misses them.
+        ++VideoCommon::Nx2FastDraw::g_rt_clean_skips;
+        // The draw still writes the targets: they must stay newer than any alias written since
+        // (SynchronizeAliases and JoinImages order copies by modification tick) and stay
+        // recently used, or the garbage collector can evict a target that is being drawn to.
+        const auto touch = [&](ImageViewId id) {
+            if (!VideoCommon::PreparesImage(slot_image_views, id)) {
+                return;
+            }
+            Image& image = slot_images[slot_image_views[id].image_id];
+            MarkModification(image);
+            lru_cache.Touch(image.lru_index, frame_tick);
+        };
+        for (const ImageViewId id : render_targets.color_buffer_ids) {
+            touch(id);
+        }
+        touch(render_targets.depth_buffer_id);
+        return;
+    }
     struct ClearingScope {
         bool& flag;
         ~ClearingScope() {
@@ -1154,6 +1183,29 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     }
 
     flags[Dirty::DepthBiasGlobal] = true;
+}
+
+template <class P>
+bool TextureCache<P>::RenderTargetsNeedPrepare() const noexcept {
+    const auto needs = [&](ImageViewId id) {
+        if (!VideoCommon::PreparesImage(slot_image_views, id)) {
+            return false;
+        }
+        const auto& image = slot_images[slot_image_views[id].image_id];
+        constexpr auto heavy = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                               ImageFlagBits::SparseTiles | ImageFlagBits::UnwrittenSparse |
+                               ImageFlagBits::Unbacked | ImageFlagBits::IsDecoding;
+        // PrepareImage(is_modification) marks the target GPU-modified. A download clears that
+        // mark; a fast draw has to prepare the target again or the mark stays clear.
+        return VideoCommon::SamplingChangesImage(image) || True(image.flags & heavy) ||
+               False(image.flags & ImageFlagBits::GpuModified);
+    };
+    for (const ImageViewId id : render_targets.color_buffer_ids) {
+        if (needs(id)) {
+            return true;
+        }
+    }
+    return needs(render_targets.depth_buffer_id);
 }
 
 template <class P>

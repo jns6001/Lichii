@@ -342,7 +342,9 @@ public:
     /// the constant buffers again) and records the draw's descriptors with the image views,
     /// samplers and texture buffers the last captured Configure resolved. False when the draw
     /// can't be recorded, as for Configure.
-    bool ConfigureDelta(bool is_indexed);
+    /// `neutral_only`: vertex and index buffers are not dirty. Skip resolving them again.
+    /// Host binds, uniforms and image-descriptor replay still run.
+    bool ConfigureDelta(bool is_indexed, bool neutral_only = false);
 
     /// The next Configure keeps the views and samplers it resolves for delta draws. With
     /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.
@@ -357,6 +359,14 @@ public:
     /// Whether an image the kept views sample has an upload pending or a newer alias to copy in:
     /// ConfigureDelta prepares none, Configure does.
     [[nodiscard]] bool DeltaImagesChange() const noexcept;
+
+    /// Views the previous draw kept. Empty until a draw captured them.
+    [[nodiscard]] const std::vector<VideoCommon::ImageViewInOut>& DeltaViews() const noexcept {
+        return delta_views;
+    }
+
+    /// Image descriptors and rescaling words from the previous draw are still the right ones.
+    [[nodiscard]] bool StickyImagesReady() const noexcept;
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {

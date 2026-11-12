@@ -89,15 +89,66 @@ public:
         // fence runs its operation at once, before the host GPU has run the work the report
         // follows, and Ocarina of Time then reads a wrong report (white flashes on leaves and walls
         // at low GPU accuracy).
-        const bool delay_fence = VideoCore::g_signaling_query_report_fence ||
-                                 (Settings::IsGPUFenceBehaviorDefault()
-                                      ? Settings::IsGPULevelHigh()
-                                      : Settings::IsGPUFenceBehaviorBalanced() ||
-                                            Settings::IsGPUFenceBehaviorAccurate());
+        const bool accuracy_delay =
+            Settings::IsGPUFenceBehaviorDefault()
+                ? Settings::IsGPULevelHigh()
+                : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        // A timestamped report or a counter result still waits for the host GPU. A payload-only
+        // release (g_early_payload_fence) is written here when this fence is not downloading.
+        bool delay_fence = accuracy_delay || VideoCore::g_signaling_query_report_fence;
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        if (VideoCore::g_early_payload_fence) {
+            const bool buffer = (committed_flushes & BufferFlushes) != 0;
+            const bool texture = (committed_flushes & TextureFlushes) != 0;
+            // GPU counter results, not this payload: GuestStreamer::pending_sync is the payload
+            // itself (HasPendingSync), and counting it would hold every release.
+            const bool query = query_cache.HasUncommittedFlushes();
+            const bool earlier = EarlierFenceWorkPending();
+            bool queued = false;
+            {
+                std::scoped_lock lock{uncommitted_guard};
+                queued = !uncommitted_operations.empty();
+            }
+            // Buffer copies committed at a fence are the ones no CPU read flushes: with "Download
+            // GPU buffers at fences" GetFlushArea does not ask the buffer cache at all
+            // (FlushesOnCpuRead), and without it only Preflushable ranges are copied at fences,
+            // and a read of those skips the flush too. The guest finds the bytes in memory only
+            // once the fence is released, so the payload waits for it, reactive flushing or not.
+            const bool hold = accuracy_delay || texture || buffer || query || earlier || queued;
+            auto add = [](std::atomic<u64>& counter) {
+                counter.fetch_add(1, std::memory_order_relaxed);
+            };
+            if (!hold) {
+                delay_fence = false;
+                add(Nx2FastDraw::g_payload_early);
+                if (buffer) {
+                    add(Nx2FastDraw::g_payload_early_buffer);
+                }
+            } else {
+                delay_fence = true;
+                if (accuracy_delay) {
+                    add(Nx2FastDraw::g_payload_held_accuracy);
+                }
+                if (buffer) {
+                    add(Nx2FastDraw::g_payload_held_buffer);
+                }
+                if (texture) {
+                    add(Nx2FastDraw::g_payload_held_texture);
+                }
+                if (query) {
+                    add(Nx2FastDraw::g_payload_held_query);
+                }
+                if (earlier) {
+                    add(Nx2FastDraw::g_payload_held_earlier);
+                }
+                if (queued) {
+                    add(Nx2FastDraw::g_payload_held_queued);
+                }
+            }
+        }
         if (Nx2Profile::Enabled()) {
             NoteFenceDecision(delay_fence, committed_flushes);
         }
@@ -108,7 +159,8 @@ public:
             return;
         }
         skipped_fences = 0;
-        should_flush |= query_cache.HasUncommittedFlushes();
+        const bool query_flushes = query_cache.HasUncommittedFlushes();
+        should_flush |= query_flushes;
         query_cache.CommitAsyncFlushes();
         TFence new_fence = CreateFence(!should_flush);
         if constexpr (can_async_check) {
@@ -119,11 +171,21 @@ public:
             if (delay_fence) {
                 uncommitted_operations.emplace_back(std::move(func));
             }
+            // Downloads (buffer ones included, see above), query results and delayed operations
+            // order a later payload. The bit is stored with the fence so the release counts the
+            // same fences.
+            const bool ordering = committed_flushes != 0 || query_flushes ||
+                                  !uncommitted_operations.empty();
+            u8 flush_bits = static_cast<u8>(committed_flushes | (query_flushes ? QueryFlushes : 0));
+            if (ordering) {
+                flush_bits |= CountsAsWork;
+                work_fences_queued.fetch_add(1, std::memory_order_acq_rel);
+            }
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
             uncommitted_operations.reserve(64);
+            pending_flushes.push_back(flush_bits);
         }
-        pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
         if (!delay_fence) {
             func();
@@ -233,12 +295,17 @@ private:
                 }
             }
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
-            PopAsyncFlushes(pending_flushes.front());
+            const u8 pending_flushes_front = pending_flushes.front();
+            PopAsyncFlushes(pending_flushes_front);
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
             pending_operations.pop_front();
+            const bool carried_work = (pending_flushes_front & CountsAsWork) != 0;
             for (auto& operation : operations) {
                 operation();
+            }
+            if (carried_work) {
+                work_fences_done.fetch_add(1, std::memory_order_acq_rel);
             }
             {
                 std::unique_lock lock(ring_guard);
@@ -317,11 +384,16 @@ private:
                 }
             }
             // Queries and operations keep their per-fence order.
+            u64 work_done = 0;
             for (Released& released : batch) {
                 query_cache.PopAsyncFlushes();
+                work_done += (released.flushes & CountsAsWork) != 0 ? 1 : 0;
                 for (auto& operation : released.operations) {
                     operation();
                 }
+            }
+            if (work_done != 0) {
+                work_fences_done.fetch_add(work_done, std::memory_order_acq_rel);
             }
             if (!batch.empty()) {
                 VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
@@ -344,6 +416,15 @@ private:
 
     static constexpr u8 TextureFlushes = 1;
     static constexpr u8 BufferFlushes = 2;
+    static constexpr u8 QueryFlushes = 4; ///< In pending_flushes only: the query cache committed
+    /// This fence orders a later payload (not a buffer-only download under reactive flushing).
+    static constexpr u8 CountsAsWork = 8;
+
+    /// A fence made before now still has downloads, query results or delayed operations to run.
+    bool EarlierFenceWorkPending() const {
+        return work_fences_queued.load(std::memory_order_acquire) !=
+               work_fences_done.load(std::memory_order_acquire);
+    }
 
     /// committed: what CommitAsyncFlushes returned for this fence.
     void PopAsyncFlushes(u8 committed) {
@@ -460,6 +541,9 @@ private:
     std::deque<OperationList> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
+    /// Fences made with downloads, query flushes or operations, and those the release has run.
+    std::atomic<u64> work_fences_queued{};
+    std::atomic<u64> work_fences_done{};
 
     std::mutex guard;
     std::mutex ring_guard;

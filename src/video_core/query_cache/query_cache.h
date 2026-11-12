@@ -20,6 +20,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/rasterizer_interface.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
@@ -354,9 +355,26 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->pending_unregister.push_back(query_location);
     });
     if (is_fence) {
-        VideoCore::g_signaling_query_report_fence = true;
+        // Counters and timestamped reports stay on the host-GPU fence. A payload with no
+        // timestamp is the frame-end semaphore BotW spins on; early_payload_releases writes it
+        // when the back reaches it if that fence has no download.
+        static u32 early_sample{};
+        static bool early_on{};
+        if ((early_sample++ & 31) == 0) {
+            early_on = Settings::values.early_payload_releases.GetValue();
+        }
+        const bool early_payload =
+            early_on && !has_timestamp && counter_type == QueryType::Payload;
+        if (early_payload) {
+            VideoCore::g_early_payload_fence = true;
+        } else {
+            VideoCore::g_signaling_query_report_fence = true;
+        }
+        SCOPE_EXIT {
+            VideoCore::g_early_payload_fence = false;
+            VideoCore::g_signaling_query_report_fence = false;
+        };
         impl->rasterizer.SignalFence(std::move(operation));
-        VideoCore::g_signaling_query_report_fence = false;
     } else {
         if (immediate) {
             FinishReads(cpu_addr, has_timestamp ? 16 : 4);

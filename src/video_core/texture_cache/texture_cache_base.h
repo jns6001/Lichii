@@ -310,6 +310,15 @@ public:
         return VideoCommon::SampledViewsChange(views, slot_image_views, slot_images);
     }
 
+    /// A bound render target would take the slow path in PrepareImage (upload, alias copy, or a
+    /// sparse image that binds memory on use).
+    [[nodiscard]] bool RenderTargetsNeedPrepare() const noexcept;
+
+    /// The previous draw samples an attachment it also writes, so the next one needs a barrier.
+    [[nodiscard]] bool FeedbackLoopActive() const noexcept {
+        return last_feedback_loop_result;
+    }
+
     /// EDEN_NX2_TEXTURE_MEMO_VERIFY: PrepareImage adds the images it is asked to prepare to `log`
     /// (nullptr stops it) and, with `dry`, does nothing else.
     void LogPrepares(std::vector<ImageId>* log, bool dry) noexcept {

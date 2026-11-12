@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <span>
@@ -31,6 +32,51 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/rasterizer_interface.h"
+
+namespace Tegra {
+
+bool SnapshotSyncEntriesOnly() {
+    return Settings::values.snapshot_sync_entries.GetValue();
+}
+
+bool DeferGpSyncSnapshots() {
+    // Called on the submit thread, so not GpuSplit::Active() (the GPU thread starts and stops
+    // the split): the settings that let it run on Switch 1 (GpuSplit::Update). Without them
+    // nothing defers, and a copy would only cost CPU and parse Switch 1 lists from it.
+    if (!Settings::values.defer_gp_sync_drain.GetValue() ||
+        !Settings::values.maxwell_gpu_thread_split.GetValue() || Settings::IsGPULevelHigh() ||
+        Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Vulkan) {
+        return false;
+    }
+    return !(Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh()
+                                           : Settings::IsDMALevelSafe());
+}
+
+void NoteGpSync(bool deferred) {
+    struct Counts {
+        u64 deferred{};
+        u64 drained{};
+        std::chrono::steady_clock::time_point window{std::chrono::steady_clock::now()};
+    };
+    static Counts counts;
+    if (deferred) {
+        ++counts.deferred;
+    } else {
+        ++counts.drained;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - counts.window < std::chrono::seconds{10}) {
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - counts.window).count();
+    LOG_INFO(HW_GPU, "GP sync per second: {:.0f} deferred, {:.0f} drained for a live command list",
+             static_cast<double>(counts.deferred) / seconds,
+             static_cast<double>(counts.drained) / seconds);
+    counts = {};
+    counts.window = now;
+}
+
+} // namespace Tegra
 
 namespace Tegra {
 
@@ -200,11 +246,45 @@ bool DmaPusher::Step() {
     const CommandListHeader& header = current_command;
     dma_state.dma_get = header.addr;
 
-    if (signal_sync && !synced) {
-        std::unique_lock lk(sync_mutex);
-        sync_cv.wait(lk, [this]() { return synced.load(); });
+    SyncFenceState& sync_state = *sync_fence_state;
+    const u64 sync_target = sync_fence_target;
+    if (signal_sync && sync_state.done.load(std::memory_order_acquire) >= sync_target) {
         signal_sync = false;
-        synced = false;
+    } else if (signal_sync) {
+        // The fence was queued in order. A list already copied at submit does not need it
+        // before parsing; a live read of GPU-written or dirty memory still does.
+        // Switch 1 does not copy lists unless defer_gp_sync_drain asked for that copy.
+        const bool defer = Settings::values.defer_gp_sync_drain.GetValue() &&
+                           VideoCommon::GpuSplit::Get().Active();
+        bool from_snapshot = false;
+        if (defer && header.size > 0 && command_resume_offset == 0) {
+            const bool gpu_written =
+                IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            const bool has_snapshot =
+                (command_list.snapshot_suspensions & 1) == 0 &&
+                command_list.snapshot_suspensions == suspensions.load(std::memory_order_acquire) &&
+                command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
+                !std::ranges::binary_search(command_list.deferred_entries,
+                                            static_cast<u32>(dma_pushbuffer_subindex));
+            from_snapshot =
+                VideoCommon::CanUseSubmittedCommands(false, has_snapshot, gpu_written, false);
+        }
+        if (!from_snapshot) {
+            if (defer) {
+                VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::GpSyncFence);
+                NoteGpSync(false);
+            }
+            std::unique_lock lk(sync_state.mutex);
+            sync_state.cv.wait(lk, [&sync_state, sync_target] {
+                return sync_state.done.load(std::memory_order_acquire) >= sync_target;
+            });
+        } else {
+            NoteGpSync(true);
+        }
+        // Handled either way: a deferred entry must not leave signal_sync set, or the end of
+        // the submission would queue a spurious fence and the next submission's first entry
+        // would be treated as synced.
+        signal_sync = false;
     }
 
     if (header.size > 0) {
@@ -287,7 +367,7 @@ bool DmaPusher::Step() {
                                    suspensions.load(std::memory_order_acquire) &&
                                VideoCommon::CanUseSubmittedCommands(
             command_resume_offset != 0,
-            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+            command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
                 !std::ranges::binary_search(command_list.deferred_entries,
                                             static_cast<u32>(dma_pushbuffer_subindex)),
             gpu_written,
@@ -300,7 +380,7 @@ bool DmaPusher::Step() {
         static const bool live_read_check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
         const CommandHeader* const submitted_copy =
             live_read_check && !submitted &&
-                    dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                    command_list.HasSubmittedEntry(dma_pushbuffer_subindex) &&
                     !std::ranges::binary_search(command_list.deferred_entries,
                                                 static_cast<u32>(dma_pushbuffer_subindex))
                 ? command_list.submitted_words.data() +
@@ -390,13 +470,27 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
-        VideoCommon::GpuSplit::Get().Run([this] {
-            rasterizer->SignalFence([this]() {
-                std::scoped_lock lk(sync_mutex);
-                synced = true;
-                sync_cv.notify_all();
+        const u64 sequence = ++sync_fence_queued;
+        sync_fence_target = sequence;
+        const auto fence = [this, sequence] {
+            rasterizer->SignalFence([state = sync_fence_state, sequence]() {
+                {
+                    std::scoped_lock lk(state->mutex);
+                    if (state->done.load(std::memory_order_relaxed) < sequence) {
+                        state->done.store(sequence, std::memory_order_release);
+                    }
+                }
+                state->cv.notify_all();
             });
-        }, VideoCommon::DrainSite::GpSyncFence);
+        };
+        auto& split = VideoCommon::GpuSplit::Get();
+        if (Settings::values.defer_gp_sync_drain.GetValue() && split.Active()) {
+            // Queued after the methods of this list. The back still runs it before later
+            // methods. The front does not wait here.
+            split.Defer(fence);
+        } else {
+            split.Run(fence, VideoCommon::DrainSite::GpSyncFence);
+        }
     }
 
     return true;
@@ -713,7 +807,8 @@ void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
     for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
+        if (offset == CommandList::NoSnapshot ||
+            u64{offset} + entry.size > list.submitted_words.size()) {
             continue;
         }
         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
@@ -729,7 +824,8 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
         }
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
-        if (offset + entry.size > list.submitted_words.size()) {
+        if (offset == CommandList::NoSnapshot ||
+            u64{offset} + entry.size > list.submitted_words.size()) {
             continue;
         }
         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,

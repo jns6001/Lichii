@@ -282,6 +282,12 @@ struct Values {
                                               true,
                                               true};
 
+    // GetClockTicks scales the counter by the CPU clock and the speed limit. Breath of the Wild
+    // reads it millions of times a second while it spins for the GPU. On: those factors are
+    // reused for a few thousand reads instead of calling into settings each time. The value is
+    // the same formula. Off by default.
+    SwitchableSetting<bool> fast_guest_tick{linkage, false, "fast_guest_tick", Category::System};
+
     SwitchableSetting<bool> use_custom_cpu_ticks{linkage,
                                                  false,
                                                  "use_custom_cpu_ticks",
@@ -673,6 +679,21 @@ struct Values {
                                                    true,
                                                    true};
 
+    // With sync_memory_operations, each synced command list drains the GPU back thread before
+    // the next list is parsed (~600 ms/s in BotW, all of it gp sync fence). On: the fence is
+    // still queued in order on the back, and the front keeps parsing lists it already copied.
+    // A list read from GPU-written or dirty memory still waits. Off by default.
+    SwitchableSetting<bool> defer_gp_sync_drain{linkage, false, "defer_gp_sync_drain",
+                                                Category::RendererAdvanced};
+
+    // 0: the fencing thread blocks in vkWaitSemaphores until the host GPU reaches the tick.
+    // Any other value is a timeout in microseconds. The wait returns and the counter is read
+    // again, so a driver that only notices the semaphore on a coarse timer still sees it within
+    // this interval. The payload is not written any earlier than the GPU actually finishing.
+    SwitchableSetting<u32, true> gpu_fence_poll_us{linkage, 0, 0, 10000, "gpu_fence_poll_us",
+                                                   Category::RendererAdvanced,
+                                                   Specialization::Countable, true, true};
+
     SwitchableSetting<bool> renderer_force_max_clock{linkage, false, "force_max_clock",
                                                      Category::RendererAdvanced};
 
@@ -738,6 +759,130 @@ struct Values {
 #endif
                                                   "use_reactive_flushing",
                                                   Category::RendererAdvanced};
+
+    // Switch 1 / Maxwell only. The split already used for Switch 2 stays as it is.
+    // Off: one GPU thread (today). On: command parsing on the GPU thread, engine methods
+    // on a second thread. Fermi macros stay on that second thread, and semaphore acquires
+    // wait for it. Does not start while GPU accuracy is Accurate or DMA reads are safe,
+    // because those flush caches the front thread must not touch. EDEN_NX2_SPLIT=0 forces off.
+    SwitchableSetting<bool> maxwell_gpu_thread_split{linkage, false, "maxwell_gpu_thread_split",
+                                                     Category::RendererAdvanced};
+
+    // Off: fast draws (and the uniform-buffer keeps that ride on them) are recorded only on
+    // the Switch 2 split's back thread, and every macro ends the chain. On: the single GPU
+    // thread may reuse an unchanged draw, and interpreted / JIT macros no longer end the
+    // chain (they send methods through CallMethod, which still breaks it when state changes).
+    // High-level macro handlers still end it. Can show stale textures if a macro's effect is
+    // not a method send.
+    SwitchableSetting<bool> fast_draw_reuse{linkage, false, "fast_draw_reuse",
+                                            Category::RendererAdvanced};
+
+    // BotW breaks fast-draw reuse on every draw by writing SET_VERTEX_ID_BASE (method 0x446,
+    // stored and never read) and the unused transform-feedback padding words (0x183, 0x1a2,
+    // the hole between 0x400 and 0x700). On: those writes do not end the chain, and a draw
+    // whose textures and vertex buffers did not change replays the previous descriptors
+    // instead of resolving images and rebinding storage again.
+    SwitchableSetting<bool> fast_draw_neutral_regs{linkage, false, "fast_draw_neutral_regs",
+                                                   Category::RendererAdvanced};
+
+    // A fast-draw delta whose constant buffers, vertex buffers, images and dynamic state did
+    // not change still walked configure, uniform binds, render targets and dynamic state
+    // (~0.9 µs, almost a full draw). On: that draw records only the draw call. Vulkan pipeline,
+    // descriptor, vertex and dynamic state stick for the render pass. Off by default.
+    SwitchableSetting<bool> fast_draw_sticky{linkage, false, "fast_draw_sticky",
+                                             Category::RendererAdvanced};
+
+    // BotW's hottest macro (code address 0xfe, ~240k calls/s) is the constant-buffer selector
+    // HLE: it only writes the selector registers an interpreted macro would send without ending
+    // a fast-draw chain. The HLE path used to break around the whole call, so the next draw was
+    // a full resolve. On: those two handlers do not break. Shader binds and clears still do.
+    // Off by default.
+    SwitchableSetting<bool> fast_draw_const_macros{linkage, false, "fast_draw_const_macros",
+                                                   Category::RendererAdvanced};
+
+    // HLE_BindShader compares the program id with the shadow scratch and returns when it
+    // matches, but the call still ended the fast-draw chain. On: an unchanged bind does not.
+    // A bind that changes the program still breaks before it writes the pipeline or the
+    // constant buffer. Off by default.
+    SwitchableSetting<bool> fast_draw_same_shader{linkage, false, "fast_draw_same_shader",
+                                                  Category::RendererAdvanced};
+
+    // A draw that rewrites part of a small uniform still copied the whole guest range into a
+    // new stream allocation. On: copy the previous upload and read only the bytes this draw's
+    // recorded constant-buffer writes overlap. A write the list does not hold still copies
+    // the whole range. Off by default.
+    SwitchableSetting<bool> uniform_patch_uploads{linkage, false, "uniform_patch_uploads",
+                                                  Category::RendererAdvanced};
+
+    // UpdateRenderTargets prepares every colour and depth target on every draw, including when
+    // the target set is unchanged and nothing is waiting to upload. On: that prepare is skipped.
+    // A target that lost its GPU-modified mark, or any other reason RenderTargetsNeedPrepare
+    // reports, is still prepared. Off by default.
+    SwitchableSetting<bool> skip_clean_render_targets{linkage, false,
+                                                      "skip_clean_render_targets",
+                                                      Category::RendererAdvanced};
+
+    // Storage-buffer pointers live in constant buffers and are re-read from guest memory on
+    // every delta draw. On: a delta whose recorded writes missed those pointer words keeps the
+    // bindings from the previous draw. An indirect pointer (read through the buffer, not the
+    // constant word) is still re-read. Off by default.
+    SwitchableSetting<bool> reuse_storage_pointers{linkage, false, "reuse_storage_pointers",
+                                                   Category::RendererAdvanced};
+
+    // BotW's frame-end semaphore is a payload release. The query cache flags every fence report,
+    // so the write waits for the host GPU even when the value does not depend on it. The guest
+    // then spins on the counter until that write. On: a payload with no timestamp is written when
+    // the back reaches it, if that fence has no buffer or texture download and no unsynced
+    // counter query. Timestamped reports and counters stay delayed (Ocarina of Time flashes
+    // white when those land early). Off by default.
+    SwitchableSetting<bool> early_payload_releases{linkage, false, "early_payload_releases",
+                                                   Category::RendererAdvanced};
+
+    // FlushCaching is called on draws that have not written since the last flush. On: return
+    // before translating an empty accumulator. Off by default.
+    SwitchableSetting<bool> skip_empty_invalidation{linkage, false, "skip_empty_invalidation",
+                                                    Category::RendererAdvanced};
+
+    // UpdatePagesCachedBatch reprotects CPU pages when a buffer's cached-page count crosses 0
+    // or 1, including pages whose type (and so their protection) already matches. On: skip
+    // VirtualProtect for a range whose pages are already in the target state. Off by default.
+    SwitchableSetting<bool> skip_unchanged_page_protect{linkage, false,
+                                                        "skip_unchanged_page_protect",
+                                                        Category::RendererAdvanced};
+
+    // defer_gp_sync_drain copies every command list at submit. Only the entries with the sync
+    // bit are parsed without waiting. On: copy those entries only, and do not zero the buffer
+    // before the copy. Other entries stay live reads, as they were before the snapshot. Off by
+    // default.
+    SwitchableSetting<bool> snapshot_sync_entries{linkage, false, "snapshot_sync_entries",
+                                                  Category::RendererAdvanced};
+
+    // Uniform keeps otherwise run only on a fast-draw delta. On: a full draw also reuses the
+    // previous upload when this draw's inline writes and tracked memory writes missed that
+    // range. A store the buffer cache was not told about (an untracked CPU write) is missed.
+    SwitchableSetting<bool> uniform_keep_full_draws{linkage, false, "uniform_keep_full_draws",
+                                                    Category::RendererAdvanced};
+
+    // 0: Switch 1 submits every 4096 draws (128 on MoltenVK), Switch 2 keeps its own budget.
+    // Any other value is the Switch 1 draw count between Vulkan submissions, rounded up to
+    // a multiple of 32. Smaller values let the host GPU start the frame while the GPU thread
+    // is still recording it. EDEN_NX2_FLUSH_DRAWS still applies when this is 0.
+    SwitchableSetting<u32, true> vulkan_flush_draws{linkage,
+                                                    0,
+                                                    0,
+                                                    16384,
+                                                    "vulkan_flush_draws",
+                                                    Category::RendererAdvanced,
+                                                    Specialization::Countable,
+                                                    true,
+                                                    true};
+
+    // Switch 1 copies every GPU-written buffer range back to guest memory at the next fence
+    // (the "buffer downloads" line). Off copies back only ranges the guest CPU has already
+    // read, which is what Switch 2 does. A game that reads a GPU buffer without that fault
+    // sees stale data. EDEN_NX2_BUFFER_DOWNLOADS=0/1 overrides this.
+    SwitchableSetting<bool> gpu_buffer_fence_downloads{linkage, true, "gpu_buffer_fence_downloads",
+                                                       Category::RendererAdvanced};
 
     SwitchableSetting<bool> barrier_feedback_loops{linkage, true, "barrier_feedback_loops",
                                                    Category::RendererAdvanced};

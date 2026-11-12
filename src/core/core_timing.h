@@ -125,6 +125,10 @@ public:
     /// Returns the current CNTPCT tick value.
     u64 GetClockTicks() const;
 
+    /// One guest timer read (GetCNTPCT). `close_spin`: the previous read on this core was only
+    /// a couple of microseconds ago. Logged when EDEN_NX2_GPU_PROFILE is set.
+    void NoteGuestCntpct(bool close_spin) const;
+
     /// Returns the current GPU tick value.
     u64 GetGPUTicks() const;
 

@@ -101,6 +101,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, cpu_clock, tr("CPU Clocks"),
            tr("Raises the clock the emulated CPU reports, which removes some FPS limiters.\n"
               "Weaker CPUs may see reduced performance, and certain games may behave improperly."));
+    INSERT(Settings, fast_guest_tick, tr("Cache guest tick scale"),
+           tr("Reuses the CPU clock and speed-limit scale for a few thousand guest timer reads "
+              "instead of looking the settings up on every read.\n"
+              "Breath of the Wild polls this timer while it waits for the GPU. The tick value "
+              "uses the same formula. Off by default."));
 
     INSERT(Settings, use_custom_cpu_ticks, QString(), QString());
     INSERT(Settings, cpu_ticks, tr("Custom CPU Ticks"),
@@ -319,6 +324,19 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Ensures data consistency between compute and memory operations.\nThis option fixes "
               "issues in games, but may degrade performance.\nUnreal Engine 4 games often see the "
               "most significant changes thereof."));
+    INSERT(Settings, gpu_fence_poll_us, tr("GPU fence poll (us)"),
+           tr("0 waits in the driver until the host GPU finishes the frame.\n"
+              "Any other value is how often, in microseconds, that wait gives up and checks the "
+              "GPU again. Use it when the driver only notices a finished frame on a coarse "
+              "timer. The guest still does not see the frame until the GPU has finished. "
+              "Off (0) by default."));
+    INSERT(Settings, defer_gp_sync_drain, tr("Defer guest sync drains"),
+           tr("With Sync Memory Operations, the GPU thread waits for the other GPU thread at "
+              "every synced command list. In Breath of the Wild that wait is most of a second "
+              "per second of play.\n"
+              "On: the fence still runs in order, and lists already copied at submit are parsed "
+              "without waiting. A list read from memory the GPU wrote still waits.\n"
+              "Off by default."));
     INSERT(Settings, async_presentation, tr("Enable asynchronous presentation (Vulkan only)"),
            tr("Slightly improves performance by moving presentation to a separate CPU thread."));
     INSERT(
@@ -406,6 +424,79 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
         Settings, use_reactive_flushing, tr("Enable Reactive Flushing"),
         tr("Uses reactive flushing instead of predictive flushing, allowing more accurate memory "
            "syncing."));
+    INSERT(Settings, maxwell_gpu_thread_split, tr("Maxwell GPU thread split"),
+           tr("Switch 1 only. Runs engine method processing on a second thread while the GPU "
+              "thread parses commands.\n"
+              "Does nothing while GPU accuracy is Accurate or DMA accuracy is Safe, and nothing "
+              "for Switch 2 titles (they already split).\n"
+              "Off by default. EDEN_NX2_SPLIT=0 forces it off."));
+    INSERT(Settings, fast_draw_reuse, tr("Reuse unchanged draw state"),
+           tr("Keeps draw setup, including uniform buffers whose bytes have not changed, across "
+              "draws on the single GPU thread.\n"
+              "Off by default: that reuse previously ran only on the Switch 2 split, and every "
+              "macro ended it. Can render stale textures if a macro changes state without a "
+              "method write."));
+    INSERT(Settings, fast_draw_neutral_regs, tr("Ignore per-draw padding writes"),
+           tr("Breath of the Wild writes SET_VERTEX_ID_BASE and unused transform-feedback "
+              "words before almost every draw, and its draw macros were ending fast-draw "
+              "reuse under those same numbers.\n"
+              "On: neither forces a full setup. A draw whose vertex buffers also stayed put, "
+              "and whose buffers the CPU did not write, replays the previous descriptors."));
+    INSERT(Settings, fast_draw_sticky, tr("Record unchanged draws only"),
+           tr("A draw whose pipeline, buffers, images and dynamic state match the previous one "
+              "records only the draw call. Setup is not run again.\n"
+              "Off by default. Needs \"Reuse unchanged draw state\". Skips the draw when a "
+              "texture upload, a feedback barrier or a state flag is pending."));
+    INSERT(Settings, fast_draw_same_shader, tr("Keep unchanged shader binds"),
+           tr("A shader bind that selects the program already bound does not end fast-draw "
+              "reuse.\n"
+              "A bind that changes the program still does. Off by default."));
+    INSERT(Settings, fast_draw_const_macros, tr("Keep constant-buffer macros"),
+           tr("Breath of the Wild's constant-buffer selector macros were ending fast-draw "
+              "reuse even though they only write the selector registers.\n"
+              "On: those macros leave the chain intact. Shader binds and clears still break it.\n"
+              "Off by default."));
+    INSERT(Settings, uniform_patch_uploads, tr("Patch constant-buffer uploads"),
+           tr("When a small uniform buffer changes, copy the previous upload and read only the "
+              "bytes this draw wrote.\n"
+              "Off by default. A write the draw did not record still copies the whole buffer."));
+    INSERT(Settings, skip_clean_render_targets, tr("Skip unchanged render targets"),
+           tr("Skips preparing colour and depth targets when the set is unchanged and nothing "
+              "is waiting to upload.\n"
+              "Off by default. A target that needs an upload is still prepared."));
+    INSERT(Settings, reuse_storage_pointers, tr("Reuse unchanged storage pointers"),
+           tr("Keeps storage-buffer bindings on a fast-draw delta when the constant-buffer "
+              "words that hold the pointers were not written.\n"
+              "Off by default. Pointers read through the buffer itself are always re-read."));
+    INSERT(Settings, early_payload_releases, tr("Release fence payloads early"),
+           tr("Writes a semaphore or query payload when the GPU thread reaches it, instead of "
+              "after the host GPU finishes, when that fence is not downloading memory.\n"
+              "Counters and timestamped reports still wait. Off by default.\n"
+              "Breath of the Wild spins until the frame-end payload is written."));
+    INSERT(Settings, skip_empty_invalidation, tr("Skip empty invalidation flushes"),
+           tr("Does not translate a constant-buffer invalidation list that has nothing in it.\n"
+              "Off by default."));
+    INSERT(Settings, skip_unchanged_page_protect, tr("Skip unchanged page protection"),
+           tr("Skips reprotecting CPU pages that are already cached or already uncached.\n"
+              "Off by default."));
+    INSERT(Settings, snapshot_sync_entries, tr("Snapshot synced command lists only"),
+           tr("With deferred guest syncs, copies only the command lists that have the sync "
+              "bit, and does not zero that buffer before the copy.\n"
+              "Off by default: every list is copied."));
+    INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
+           tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
+              "inline writes and tracked memory writes did not touch that range.\n"
+              "Off by default. Misses a store into uniform memory the buffer cache is not "
+              "watching."));
+    INSERT(Settings, vulkan_flush_draws, tr("Vulkan submit interval (draws)"),
+           tr("Switch 1 only. 0 keeps the built-in interval (4096 draws, 128 on MoltenVK).\n"
+              "A smaller interval submits the frame while the GPU thread is still building it, "
+              "so the host GPU can start sooner. Rounded up to a multiple of 32."));
+    INSERT(Settings, gpu_buffer_fence_downloads, tr("Download GPU buffers at fences"),
+           tr("Switch 1 copies every buffer the GPU wrote back to guest memory when a fence "
+              "completes.\n"
+              "Off does not. A later CPU read of that memory flushes it on demand, instead of "
+              "marking the page and copying it again at every fence."));
     INSERT(Settings, use_video_framerate, tr("Sync to framerate of video playback"),
            tr("Run the game at normal speed during video playback, even when the framerate is "
               "unlocked."));

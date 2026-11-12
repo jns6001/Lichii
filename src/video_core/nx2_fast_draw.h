@@ -130,9 +130,13 @@ struct Delta {
     std::array<DAddr, MaxWrites> device_begin{};
     std::array<DAddr, MaxWrites> device_end{};
     u32 num_device_writes{};
+    /// A write was not recorded: the list is full, or a texture/sampler header write returned
+    /// before noting the range. Uniform keeps must not trust this delta.
+    bool overflowed{};
 
     [[nodiscard]] bool Empty() const {
-        return num_writes == 0 && (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
+        return !overflowed && num_writes == 0 &&
+               (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
     }
 
     /// Whether data written reaches [address, address + size), whose device memory is spans: at
@@ -184,6 +188,7 @@ inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
     }
     Delta& delta = g_delta;
     if (!AppendRange(delta.write_begin, delta.write_end, delta.num_writes, begin, end)) {
+        delta.overflowed = true;
         Break(Reason::DeltaOverflow);
     }
 }
@@ -195,8 +200,55 @@ inline void NoteDeviceData(DAddr begin, DAddr end) {
     }
     Delta& delta = g_delta;
     if (!AppendRange(delta.device_begin, delta.device_end, delta.num_device_writes, begin, end)) {
+        delta.overflowed = true;
         Break(Reason::DeltaOverflow);
     }
+}
+
+/// Macro calls that broke a chain, and constant-buffer selector calls that were kept. The GPU
+/// back thread writes this; the fast-draw report reads and clears it.
+struct MacroNote {
+    u32 method{};
+    u32 count{};
+    const char* kind{};
+    bool kept{};
+};
+
+inline std::array<MacroNote, 16> g_macro_notes{};
+inline u64 g_macro_note_overflow{};
+inline u64 g_rt_clean_skips{};
+inline u64 g_storage_reused{};
+/// Payload fence releases written when the back reaches them, and those still held for the host
+/// GPU. The fencing decision is on the GPU thread; the fast-draw report reads these.
+inline std::atomic<u64> g_payload_early{};
+/// Early writes that still left buffer downloads on the host fence (reactive flushing covers reads).
+inline std::atomic<u64> g_payload_early_buffer{};
+inline std::atomic<u64> g_payload_held_accuracy{};
+inline std::atomic<u64> g_payload_held_buffer{};
+inline std::atomic<u64> g_payload_held_texture{};
+inline std::atomic<u64> g_payload_held_query{};
+inline std::atomic<u64> g_payload_held_earlier{};
+inline std::atomic<u64> g_payload_held_queued{};
+/// FlushCaching calls with an empty accumulator, and calls that translated ranges.
+inline std::atomic<u64> g_inval_empty{};
+inline std::atomic<u64> g_inval_ran{};
+/// RasterizerMarkRegionCached ranges whose protection was already the target, and ranges
+/// reprotected.
+inline std::atomic<u64> g_protect_skipped{};
+inline std::atomic<u64> g_protect_ran{};
+
+inline void NoteMacro(u32 method, const char* kind, bool kept) {
+    for (MacroNote& note : g_macro_notes) {
+        if (note.count != 0 && note.method == method && note.kind == kind && note.kept == kept) {
+            ++note.count;
+            return;
+        }
+        if (note.count == 0) {
+            note = MacroNote{method, 1, kind, kept};
+            return;
+        }
+    }
+    ++g_macro_note_overflow;
 }
 
 } // namespace VideoCommon::Nx2FastDraw

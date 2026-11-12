@@ -3276,6 +3276,8 @@ public:
     /// constant buffer bind or the buffers a delta draw binds again, or that ProcessMethodCall
     /// handles, so writing them doesn't end draw reuse.
     static bool IsFastDrawParameter(u32 method);
+    /// SET_VERTEX_ID_BASE and the unused transform-feedback padding, when the setting is on.
+    static bool IsFastDrawNeutral(u32 method);
     /// Methods fast draw records as light changes (constant buffer data and binds).
     static bool IsFastDrawDeltaMethod(u32 method);
     /// A vertex stream's address, size or limit (not its stride or enable).
@@ -3317,8 +3319,10 @@ private:
             draw_manager.DrawDeferred(*this, true);
         }
         // A changed register that doesn't only parameterize the next draw ends fast draw reuse.
+        // fast_draw_neutral_regs: SET_VERTEX_ID_BASE and the transform-feedback padding hole
+        // change no draw input (IsFastDrawNeutral).
         if (VideoCommon::Nx2FastDraw::Enabled() && regs.reg_array[method] != argument &&
-            !IsFastDrawParameter(method)) {
+            !IsFastDrawParameter(method) && !IsFastDrawNeutral(method)) {
             VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
         }
         regs.reg_array[method] = argument;

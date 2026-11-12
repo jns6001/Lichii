@@ -1162,12 +1162,69 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
+bool GraphicsPipeline::StickyImagesReady() const noexcept {
+    return kept_images_valid && delta_views_valid &&
+           kept_scale_epoch == texture_cache.ScaleEpoch() && !DeltaImagesChange();
+}
+
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are resolved, synchronized and bound as it does.
+    // A neutral draw (padding / vertex-id-base only, vertex buffers clean) still pushes
+    // uniforms and storage descriptors: the queue is rebuilt every draw. It does not walk
+    // the geometry cache again. Image descriptors replay when the previous draw kept them;
+    // otherwise this falls back to a normal delta configure.
+    const bool replay_images_now =
+        neutral_only && kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch();
+    if (neutral_only && !replay_images_now) {
+        neutral_only = false;
+    }
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
-    {
+    // Storage pointers live in constant buffers. An empty delta did not rewrite them, so the
+    // bindings from the previous draw are still the ones BindHostStageBuffers emits. Unbinding
+    // here would drop those entries from this draw's descriptor payload.
+    bool reuse_storage = false;
+    if (!neutral_only) {
+        // The pointer words were not in this draw's recorded writes, so the bindings the previous
+        // draw left are still the ones BindHostStageBuffers emits. An indirect pointer is read
+        // from the buffer itself and is not covered by that list.
+        static u32 storage_sample{};
+        static bool reuse_setting{};
+        if ((storage_sample++ & 31) == 0) {
+            reuse_setting = Settings::values.reuse_storage_pointers.GetValue();
+        }
+        bool any_storage = false;
+        bool pointers_stable = reuse_setting && buffer_cache.UniformWritesComplete();
+        if (pointers_stable) {
+            for (size_t stage = 0; stage < NUM_STAGES && pointers_stable; ++stage) {
+                if (!configured_stages[stage]) {
+                    continue;
+                }
+                for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                    any_storage = true;
+                    DAddr begin{};
+                    u32 span{};
+                    // StorageBufferBinding reads the address and the size word after it. A
+                    // constant buffer bound again (another address) holds other pointers.
+                    constexpr u32 pointer_bytes = 2 * sizeof(u64);
+                    if (desc.count != 1 || desc.indirect_offset != ~0U ||
+                        buffer_cache.UniformSlotRebound(stage, desc.cbuf_index) ||
+                        !buffer_cache.UniformDeviceSpan(stage, desc.cbuf_index, begin, span) ||
+                        u64{desc.cbuf_offset} + pointer_bytes > span ||
+                        !buffer_cache.RangeMissesUniformWrites(
+                            begin + desc.cbuf_offset, begin + desc.cbuf_offset + pointer_bytes)) {
+                        pointers_stable = false;
+                        break;
+                    }
+                }
+            }
+        }
+        reuse_storage = pointers_stable && any_storage;
+    }
+    if (reuse_storage) {
+        ++VideoCommon::Nx2FastDraw::g_storage_reused;
+    } else if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (!configured_stages[stage]) {
@@ -1184,8 +1241,10 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
             }
         }
     }
-    {
+    if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        // Vertex state sticks for the rest of this render pass. A neutral draw did not dirty
+        // it and the buffer cache saw no write, so the binds the previous draw recorded stand.
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }

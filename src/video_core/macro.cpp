@@ -49,6 +49,8 @@ using Maxwell3D = Engines::Maxwell3D;
 
 namespace {
 
+bool SameShaderKept();
+
 bool IsTopologySafe(Maxwell3D::Regs::PrimitiveTopology topology) {
     switch (topology) {
     case Maxwell3D::Regs::PrimitiveTopology::Points:
@@ -333,6 +335,11 @@ void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d
     if ((parameters[1] - regs.shadow_scratch[28 + index]) == 0) {
         return;
     }
+    // The blanket break may have been skipped (fast_draw_same_shader). The program id changed:
+    // end the chain before the pipeline and the constant-buffer bind below. Unconditional: the
+    // setting is sampled separately here and in MacroEngine::Execute, so the two can disagree
+    // on the call that picks up a change, and a second break is only a serial increment.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
 
     regs.pipelines[index & 0xF].offset = parameters[2];
     maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
@@ -1347,6 +1354,117 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
     macro_file.write(reinterpret_cast<const char*>(code.data()), code.size_bytes());
 }
 
+namespace {
+
+// HLE handlers write Maxwell registers themselves, so the whole call has to end fast-draw
+// reuse. The interpreter and the x86 JIT only change that state by sending methods through
+// Maxwell3D::CallMethod, which breaks reuse when the write is one a later draw must see.
+bool FastDrawReuseKeepsMacro(const AnyCachedMacro& program) {
+    if (!Settings::values.fast_draw_reuse.GetValue()) {
+        return false;
+    }
+    return std::holds_alternative<MacroInterpreterImpl>(program) ||
+           std::holds_alternative<std::unique_ptr<DynamicCachedMacro>>(program);
+}
+
+/// The break id in the fast-draw log is this macro's code offset, not a Maxwell register.
+/// Draw-only handlers issue the draw themselves and put the attribute replacements back before
+/// returning. fast_draw_neutral_regs lets those chain; shader binds and clears still break.
+bool DrawOnlyHleSkipsBreak(const AnyCachedMacro& program) {
+    if (!Settings::values.fast_draw_neutral_regs.GetValue()) {
+        return false;
+    }
+    return std::holds_alternative<HLE_DrawArraysIndirect>(program) ||
+           std::holds_alternative<HLE_DrawIndexedIndirect>(program) ||
+           std::holds_alternative<HLE_MultiDrawIndexedIndirectCount>(program) ||
+           std::holds_alternative<HLE_DrawIndirectByteCount>(program);
+}
+
+/// HLE_C713 writes the constant-buffer selector (address, size 0x7000, offset). HLE_D733 writes
+/// the selector address and size from the scratch table. Neither binds a stage slot or draws.
+/// An interpreted copy of either sends those registers through CallMethod, and they are delta
+/// methods, so the chain stays up. The HLE writes the registers itself and used to break anyway.
+bool IsConstSelectorHle(const AnyCachedMacro& program) {
+    return std::holds_alternative<HLE_C713C83D8F63CCF3>(program) ||
+           std::holds_alternative<HLE_D7333D26E0A93EDE>(program);
+}
+
+bool ConstMacrosKept() {
+    // Sampled: this runs on every macro call, and GetValue is a virtual call.
+    static u32 sample{};
+    static bool on{};
+    if ((sample++ & 31) == 0) {
+        on = Settings::values.fast_draw_const_macros.GetValue();
+    }
+    return on;
+}
+
+bool SameShaderKept() {
+    static u32 sample{};
+    static bool on{};
+    if ((sample++ & 31) == 0) {
+        on = Settings::values.fast_draw_same_shader.GetValue();
+    }
+    return on;
+}
+
+const char* MacroKind(const AnyCachedMacro& program) {
+    if (std::holds_alternative<HLE_C713C83D8F63CCF3>(program)) {
+        return "const-selector";
+    }
+    if (std::holds_alternative<HLE_D7333D26E0A93EDE>(program)) {
+        return "const-table";
+    }
+    if (std::holds_alternative<HLE_BindShader>(program)) {
+        return "bind-shader";
+    }
+    if (std::holds_alternative<HLE_ClearConstBuffer>(program)) {
+        return "clear-const";
+    }
+    if (std::holds_alternative<HLE_ClearMemory>(program)) {
+        return "clear-memory";
+    }
+    if (std::holds_alternative<HLE_SetRasterBoundingBox>(program)) {
+        return "raster-box";
+    }
+    if (std::holds_alternative<HLE_TransformFeedbackSetup>(program)) {
+        return "tf-setup";
+    }
+    if (std::holds_alternative<HLE_MultiLayerClear>(program)) {
+        return "layer-clear";
+    }
+    if (std::holds_alternative<HLE_DrawArraysIndirect>(program)) {
+        return "draw-arrays";
+    }
+    if (std::holds_alternative<HLE_DrawIndexedIndirect>(program)) {
+        return "draw-indexed";
+    }
+    if (std::holds_alternative<HLE_MultiDrawIndexedIndirectCount>(program)) {
+        return "draw-multi";
+    }
+    if (std::holds_alternative<HLE_DrawIndirectByteCount>(program)) {
+        return "draw-byte";
+    }
+    if (std::holds_alternative<MacroInterpreterImpl>(program)) {
+        return "interpreter";
+    }
+    if (std::holds_alternative<std::unique_ptr<DynamicCachedMacro>>(program)) {
+        return "jit";
+    }
+    return "other";
+}
+
+void NoteBreakingMacro(u32 method, const AnyCachedMacro& program, bool keep) {
+    const bool selector = IsConstSelectorHle(program);
+    const bool shader = std::holds_alternative<HLE_BindShader>(program);
+    if (keep && !selector && !shader) {
+        return;
+    }
+    VideoCommon::Nx2FastDraw::NoteMacro(method, MacroKind(program), keep);
+}
+
+} // namespace
+
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                           std::span<const u32> parameters) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
@@ -1631,9 +1749,19 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     // HLE programs write registers directly, without the 3D engine's fast draw breaks.
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
-        FastDraw::Break(FastDraw::Reason::Method, method);
+        const bool keep = FastDrawReuseKeepsMacro(it->second.program) ||
+                          DrawOnlyHleSkipsBreak(it->second.program) ||
+                          (ConstMacrosKept() && IsConstSelectorHle(it->second.program)) ||
+                          (SameShaderKept() &&
+                           std::holds_alternative<HLE_BindShader>(it->second.program));
+        NoteBreakingMacro(method, it->second.program, keep);
+        if (!keep) {
+            FastDraw::Break(FastDraw::Reason::Method, method);
+        }
         execute_variant(it->second.program);
-        FastDraw::Break(FastDraw::Reason::Method, method);
+        if (!keep) {
+            FastDraw::Break(FastDraw::Reason::Method, method);
+        }
         return;
     }
 
@@ -1674,9 +1802,17 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         ci.program = Compile(system, maxwell3d, code);
     }
 
-    FastDraw::Break(FastDraw::Reason::Method, method);
+    const bool keep = FastDrawReuseKeepsMacro(ci.program) || DrawOnlyHleSkipsBreak(ci.program) ||
+                      (ConstMacrosKept() && IsConstSelectorHle(ci.program)) ||
+                      (SameShaderKept() && std::holds_alternative<HLE_BindShader>(ci.program));
+    NoteBreakingMacro(method, ci.program, keep);
+    if (!keep) {
+        FastDraw::Break(FastDraw::Reason::Method, method);
+    }
     execute_variant(ci.program);
-    FastDraw::Break(FastDraw::Reason::Method, method);
+    if (!keep) {
+        FastDraw::Break(FastDraw::Reason::Method, method);
+    }
     if (Settings::values.dump_macros) {
         Dump(ci.hash, code, !std::holds_alternative<std::monostate>(ci.program));
     }

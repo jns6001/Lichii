@@ -535,6 +535,55 @@ public:
     /// buffer binds and data since the previous draw when it is a fast draw delta draw, else
     /// nullptr.
     void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
+    /// No buffer-cache write or buffer deletion since the previous draw. CPU writes do not
+    /// bump the fast-draw serial, so a neutral delta has to ask.
+    [[nodiscard]] bool DrawUploadsQuiet() const noexcept {
+        return !uniform_keep.memory_writes_lost && uniform_keep.memory_writes.empty() &&
+               uniform_keep.draw_deletions == buffer_deletions;
+    }
+
+    /// The recorded constant-buffer writes since the previous draw are the whole set (the delta
+    /// was not dropped, and no memory-write note was lost).
+    [[nodiscard]] bool UniformWritesComplete() const noexcept {
+        return uniform_keep.writes_complete;
+    }
+
+    /// Whether the delta since the previous draw bound constant buffer `index` of `stage` (a
+    /// new address or the same one). True when the delta is unknown.
+    [[nodiscard]] bool UniformSlotRebound(size_t stage, u32 index) const noexcept {
+        if (!uniform_keep.writes_complete || stage >= NUM_STAGES || index >= 32) {
+            return true;
+        }
+        return ((uniform_keep.delta_binds[stage] >> index) & 1) != 0;
+    }
+
+    /// Whether [begin, end) misses every recorded uniform write. False when the list is incomplete.
+    [[nodiscard]] bool RangeMissesUniformWrites(DAddr begin, DAddr end) const noexcept {
+        if (!uniform_keep.writes_complete || begin >= end) {
+            return false;
+        }
+        for (const auto& write : uniform_keep.writes) {
+            if (write.first < end && begin < write.second) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Device range of a bound graphics uniform slot. False when the slot is empty.
+    [[nodiscard]] bool UniformDeviceSpan(size_t stage, u32 index, DAddr& begin,
+                                        u32& size) const noexcept {
+        if (stage >= NUM_STAGES || index >= NUM_GRAPHICS_UNIFORM_BUFFERS) {
+            return false;
+        }
+        const Binding& binding = channel_state->uniform_buffers[stage][index];
+        if (binding.device_addr == 0 || binding.size == 0) {
+            return false;
+        }
+        begin = binding.device_addr;
+        size = binding.size;
+        return true;
+    }
 
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
@@ -789,7 +838,9 @@ private:
     /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
     /// between the two draws wrote its range: no inline constant data, no rebind, no CPU write the
     /// caches were told about, no GPU write and no buffer deletion. Anything else in between ends
-    /// the delta chain.
+    /// the delta chain. The chain is recorded only on the split's back thread unless
+    /// fast_draw_reuse is on, and every macro ends it unless that setting is on and the macro is
+    /// interpreted or JIT-compiled. A Switch 1 profile therefore reports keeps of 0 until then.
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
     void NoteUniformWrite(DAddr device_addr, u64 size) {
@@ -809,12 +860,18 @@ private:
     struct UniformKeep {
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
+        std::array<u32, NUM_STAGES> prev_streamed{}; ///< Streamed by the previous draw
+        std::array<u32, NUM_STAGES> delta_binds{};   ///< Slots the delta bound (writes_complete)
         /// Device ranges written since the previous draw began: inline constant data, then the
         /// CPU writes and GPU-modified marks.
         boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>
             writes;
         boost::container::static_vector<std::pair<DAddr, DAddr>, 8> memory_writes;
         bool memory_writes_lost{}; ///< More writes than memory_writes holds
+        /// `writes` holds every inline and tracked write since the previous draw.
+        bool writes_complete{};
+        /// uniform_patch_uploads, sampled once per draw.
+        bool patch{};
         u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
         u64 kept{};
         u64 streamed_binds{};
@@ -841,6 +898,11 @@ private:
         }();
         if (forced >= 0) {
             return forced == 1;
+        }
+        // Switch 2 never copies every GPU write back (UsesNativeTiling). Switch 1 does, unless
+        // the setting says to copy only ranges the guest has already read (Preflushable).
+        if (!Settings::values.gpu_buffer_fence_downloads.GetValue()) {
+            return false;
         }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }

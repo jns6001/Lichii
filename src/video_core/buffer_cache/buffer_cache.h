@@ -374,8 +374,10 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         area->preemtive = false;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
-    // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // instead keep read traps and flush on demand. The same for Switch 1 when fence downloads
+    // are off: the first read flushes on demand and does not mark the page.
+    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                          Settings::values.gpu_buffer_fence_downloads.GetValue();
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
@@ -1690,8 +1692,17 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     keep.draw_deletions = buffer_deletions;
     keep.candidates = {};
     keep.writes.clear();
+    keep.writes_complete = false;
+    // GetValue is virtual. One read per 32 draws is enough for a setting flipped from the UI.
+    static u32 patch_sample{};
+    static bool patch_on{};
+    if ((patch_sample++ & 31) == 0) {
+        patch_on = Settings::values.uniform_patch_uploads.GetValue();
+    }
+    keep.patch = patch_on;
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
-    const bool usable = delta != nullptr && unwritten;
+    keep.prev_streamed = streamed;
+    const bool usable = delta != nullptr && unwritten && !delta->overflowed;
     if (usable) {
         keep.writes.insert(keep.writes.end(), keep.memory_writes.begin(),
                            keep.memory_writes.end());
@@ -1706,7 +1717,9 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     for (u32 write = 0; write < delta->num_device_writes; ++write) {
         keep.writes.emplace_back(delta->device_begin[write], delta->device_end[write]);
     }
+    keep.writes_complete = true;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        keep.delta_binds[stage] = delta->binds[stage];
         keep.candidates[stage] = streamed[stage] & ~delta->binds[stage];
     }
 }
@@ -2573,8 +2586,18 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
             // EDEN_NX2_UBOREUSE=0 turns it off.
             if (VideoCommon::UniformStreamReuseEnabled()) {
-                streamed = VideoCommon::BindSmallUniformReusing(
-                    runtime, device_memory, stage, index, binding_index, device_addr, size);
+                // `writes` covers only the time since the previous draw: the slot's bytes are
+                // current only if that draw streamed (or kept) this slot.
+                if (uniform_keep.patch && uniform_keep.writes_complete &&
+                    ((uniform_keep.prev_streamed[stage] >> index) & 1) != 0) {
+                    streamed = VideoCommon::BindSmallUniformPatching(
+                        runtime, device_memory, stage, index, binding_index, device_addr, size,
+                        uniform_keep.writes);
+                }
+                if (!streamed) {
+                    streamed = VideoCommon::BindSmallUniformReusing(
+                        runtime, device_memory, stage, index, binding_index, device_addr, size);
+                }
                 if (streamed) {
                     uniform_keep.streamed[stage] |= 1u << index;
                     ++uniform_keep.streamed_binds;

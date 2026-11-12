@@ -394,6 +394,9 @@ private:
         u64 map_serial{};
         u64 tick{};
         u64 render_pass{};
+        /// XOR of the HLE attribute-replacement table at record time. Empty and a draw that
+        /// swaps base-vertex for draw-id do not share a pipeline.
+        u64 replacements{};
         Maxwell::PrimitiveTopology topology{};
         bool is_indexed{};
     };
@@ -424,9 +427,22 @@ private:
         OffBackThread,
         Count,
     };
-    enum class DrawPath : u8 { Full, Delta, Count };
+    enum class DrawPath : u8 { Full, Delta, Sticky, Count };
     struct FastDrawStats {
         u64 delta{};
+        u64 sticky{};
+        /// UpdateDynamicStates returned without recording: no dynamic-state flag was set.
+        u64 dynamic_skipped{};
+        /// Draws whose FlushCaching had a range to invalidate.
+        u64 invalidation_flushes{};
+        /// Deltas that were not sticky, by the first reason.
+        u64 sticky_skip_writes{};
+        u64 sticky_skip_geometry{};
+        u64 sticky_skip_cache{};
+        u64 sticky_skip_dynamic{};
+        u64 sticky_skip_images{};
+        u64 sticky_skip_targets{};
+        u64 sticky_skip_barrier{};
         std::array<u64, static_cast<size_t>(FullDraw::Count)> full{};
         std::array<u64, static_cast<size_t>(Ineligible::Count)> ineligible{};
         /// PrepareDraw time and draws per path.

@@ -95,8 +95,21 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
         return value != nullptr ? value[0] : '2';
     }();
-    const bool wanted = mode == '1' || mode == '2';
-    if (!wanted || !Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+    const bool ampere = Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    // EDEN_NX2_SPLIT=0 forces one thread. Otherwise Switch 2 follows the env mode (default 2)
+    // and Switch 1 follows maxwell_gpu_thread_split. Maxwell must not set front_macros: that
+    // flag lets semaphore acquires pass without a drain, which is only valid once the front
+    // itself notes the releases (the Turing macro mirror). Fermi macros run on the back.
+    const bool force_off = mode == '0';
+    const bool ampere_wanted = !force_off && ampere && (mode == '1' || mode == '2');
+    const bool maxwell_wanted = !force_off && !ampere &&
+                                Settings::values.maxwell_gpu_thread_split.GetValue();
+    if (!ampere_wanted && !maxwell_wanted) {
+        if (active) {
+            Drain();
+            Stop();
+            LOG_INFO(HW_GPU, "GPU thread split: stopped");
+        }
         return;
     }
     // The front reads command lists straight from guest memory; a read that flushes the caches
@@ -113,6 +126,15 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         return;
     }
     if (active || !allowed) {
+        if (!active && maxwell_wanted) {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                LOG_INFO(HW_GPU,
+                         "GPU thread split: Maxwell setting is on, but GPU accuracy is Accurate "
+                         "or DMA reads are safe, so commands stay on one thread");
+            }
+        }
         return;
     }
     system = &system_;
@@ -125,7 +147,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     active = true;
     ++starts;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
-    front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
+    front_macros = ampere_wanted && mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
 }

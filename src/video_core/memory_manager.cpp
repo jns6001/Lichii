@@ -11,6 +11,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -21,6 +22,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "video_core/texture_cache/util.h"
@@ -1054,6 +1056,20 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
 }
 
 void MemoryManager::FlushCaching() {
+    // Sampled: this runs on every draw, and GetValue is a virtual call.
+    static u32 sample{};
+    static bool skip_empty{};
+    if ((sample++ & 31) == 0) {
+        skip_empty = Settings::values.skip_empty_invalidation.GetValue();
+    }
+    if (!accumulator.Pending()) {
+        VideoCommon::Nx2FastDraw::g_inval_empty.fetch_add(1, std::memory_order_relaxed);
+        if (skip_empty) {
+            return;
+        }
+    } else {
+        VideoCommon::Nx2FastDraw::g_inval_ran.fetch_add(1, std::memory_order_relaxed);
+    }
     // Flush from the invalidate accumulator
     if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);

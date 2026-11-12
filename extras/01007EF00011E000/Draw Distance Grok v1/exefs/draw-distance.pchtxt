@@ -1,0 +1,13 @@
+@nsobid-CD57B23FA4BBAD65803D9788C01821EE
+
+# Draw Distance Grok v1
+# BotW Switch 1.9.0 placed-object multiplier. DISABLED: the file offset of the
+# 1.0 immediate in ksys::map::Object::getDispDistance is not published for
+# this build. Do not enable a guessed line. Confirm @nsobid against
+# "Patching NSO for name=main, build_id=..." in the Lichii log.
+# When the offset is known, one enabled line replaces the mov/fmov of
+# 1.0 (0x3f800000) with 1.5 (0x3fc00000), and nothing else.
+# 1.6.0's addresses (0x7101557700 and 0x7101586b5c) are a different binary.
+
+@disabled
+@stop

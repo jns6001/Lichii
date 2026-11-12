@@ -35,6 +35,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/rasterizer_download_area.h"
@@ -499,7 +500,35 @@ struct Memory::Impl {
             return;
         }
 
+        const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
+        const u64 first_page = vaddr >> YUZU_PAGEBITS;
+        current_page_table->entries.CommitRegion(first_page, first_page + num_pages);
+        // The count crosses 0 or 1 for pages that are already in the target state. Reprotecting
+        // them is the VirtualProtect cost in the BotW profile.
+        static u32 protect_sample{};
+        static bool skip_same{};
+        if ((protect_sample++ & 31) == 0) {
+            skip_same = Settings::values.skip_unchanged_page_protect.GetValue();
+        }
+        bool skip_protect = false;
+        if (skip_same && current_page_table->fastmem_arena) {
+            const auto target = cached ? Common::PageType::RasterizerCachedMemory
+                                       : Common::PageType::Memory;
+            skip_protect = true;
+            u64 scan = vaddr;
+            for (u64 i = 0; i < num_pages; ++i, scan += YUZU_PAGESIZE) {
+                if (current_page_table->entries.GetUnchecked(scan >> YUZU_PAGEBITS).Type() !=
+                    target) {
+                    skip_protect = false;
+                    break;
+                }
+            }
+        }
+
         if (current_page_table->fastmem_arena) {
+            if (skip_protect) {
+                VideoCommon::Nx2FastDraw::g_protect_skipped.fetch_add(1, std::memory_order_relaxed);
+            } else {
             Common::MemoryPermission perm{};
             // EDEN_NX2_NO_REACTIVE=1 drops the read traps on Switch 2 programs. Opt-in: without
             // them a CPU read of GPU-written memory can see stale data.
@@ -520,6 +549,8 @@ struct Memory::Impl {
             if (cached && perm != Common::MemoryPermission{}) {
                 ProtectArmedPages(vaddr, size);
             }
+            VideoCommon::Nx2FastDraw::g_protect_ran.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         // Iterate over a contiguous CPU address space, which corresponds to the specified GPU
@@ -527,8 +558,6 @@ struct Memory::Impl {
         // granularity of CPU pages, hence why we iterate on a CPU page basis (note: GPU page size
         // is different). This assumes the specified GPU address region is contiguous as well.
 
-        const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
-        current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr >> YUZU_PAGEBITS) + num_pages);
         for (u64 i = 0; i < num_pages; ++i, vaddr += YUZU_PAGESIZE) {
             auto& entry = current_page_table->entries.GetUnchecked(vaddr >> YUZU_PAGEBITS);
             const Common::PageType page_type = entry.Type();
