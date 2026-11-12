@@ -1202,7 +1202,9 @@ bool GraphicsPipeline::ConstantDataKeepsBindings(const VideoCommon::Nx2FastDraw:
         }
         const auto& info = stage_infos[stage];
         for (const auto& desc : info.storage_buffers_descriptors) {
-            if (overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
+            // A table pointer lives at cbuf_offset. The storage address is an entry outside
+            // the constant buffer, which the overlap check does not see.
+            if (desc.indirect_offset != ~0U || overlaps(stage, desc.cbuf_index, desc.cbuf_offset)) {
                 return false;
             }
         }

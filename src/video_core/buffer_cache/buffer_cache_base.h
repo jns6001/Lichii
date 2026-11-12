@@ -540,9 +540,13 @@ public:
     void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
     /// No buffer-cache write or buffer deletion since the previous draw. CPU writes do not
     /// bump the fast-draw serial, so a neutral delta has to ask.
-    [[nodiscard]] bool DrawUploadsQuiet() const noexcept {
-        return !uniform_keep.memory_writes_lost && uniform_keep.memory_writes.empty() &&
-               uniform_keep.draw_deletions == buffer_deletions;
+    /// `covered`: constant-buffer device ranges this draw recorded. A write fully inside those,
+    /// and not on a vertex, index, storage or texture-buffer binding, does not count. Lost
+    /// writes and deletions still do.
+    [[nodiscard]] bool DrawUploadsQuiet(
+        const VideoCommon::Nx2FastDraw::Delta* covered = nullptr) const noexcept;
+    [[nodiscard]] std::span<const std::pair<DAddr, DAddr>> PendingUploadWrites() const noexcept {
+        return {uniform_keep.memory_writes.data(), uniform_keep.memory_writes.size()};
     }
 
     Common::SpinRecursiveMutex mutex;

@@ -700,20 +700,20 @@ void RasterizerVulkan::ReportFastDraws() {
              all_draws == 0 ? 0.0 : static_cast<double>(all_ns) / 1e3 / static_cast<double>(all_draws),
              static_cast<double>(all_draws) / seconds);
     LOG_INFO(Render_Vulkan,
-             "Fast draw sticky per second: {:.0f} recorded, {:.0f} uniform-only | not sticky: {:.0f} "
-             "const writes, {:.0f} geometry, {:.0f} buffer cache, {:.0f} dynamic state, {:.0f} "
-             "images, {:.0f} render targets, {:.0f} feedback barrier | dynamic state skipped "
+             "Fast draw sticky per second: {:.0f} recorded, {:.0f} uniform-only | first skip: {:.0f} "
+             "geometry, {:.0f} buffer cache, {:.0f} render targets, {:.0f} dynamic state, {:.0f} "
+             "images, {:.0f} feedback barrier, {:.0f} const writes | dynamic state skipped "
              "{:.0f} (colour mask {:.0f}, topology {:.0f}) | invalidation flushes {:.0f}, "
              "repeated {:.0f}",
              static_cast<double>(stats.sticky) / seconds,
              static_cast<double>(stats.uniform_fast) / seconds,
-             static_cast<double>(stats.sticky_skip_writes) / seconds,
              static_cast<double>(stats.sticky_skip_geometry) / seconds,
              static_cast<double>(stats.sticky_skip_cache) / seconds,
+             static_cast<double>(stats.sticky_skip_targets) / seconds,
              static_cast<double>(stats.sticky_skip_dynamic) / seconds,
              static_cast<double>(stats.sticky_skip_images) / seconds,
-             static_cast<double>(stats.sticky_skip_targets) / seconds,
              static_cast<double>(stats.sticky_skip_barrier) / seconds,
+             static_cast<double>(stats.sticky_skip_writes) / seconds,
              static_cast<double>(stats.dynamic_skipped) / seconds,
              static_cast<double>(stats.dynamic_mask) / seconds,
              static_cast<double>(stats.dynamic_topology) / seconds,
@@ -1165,8 +1165,47 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     // Full draws still collected inline constant writes into taken_delta (TakeReusableDraw
     // always swaps it). uniform_keep_full_draws uses those to drop unchanged slots.
     const bool keep_full = Settings::values.uniform_keep_full_draws.GetValue();
-    // Read before BeginGraphicsUniforms clears the write list.
-    const bool cache_quiet = buffer_cache.DrawUploadsQuiet();
+    // Read before BeginGraphicsUniforms clears the write list. Constant-buffer bytes this
+    // draw recorded are the uniform-only path's source: they do not make the cache unquiet
+    // unless they also land on a vertex, index, storage, texture-buffer, image or handle.
+    const bool cache_quiet = [&] {
+        const auto* const covered = path == DrawPath::Delta ? &taken_delta : nullptr;
+        if (!buffer_cache.DrawUploadsQuiet(covered)) {
+            return false;
+        }
+        if (covered == nullptr || buffer_cache.PendingUploadWrites().empty()) {
+            return true;
+        }
+        const auto hits_handle = [&](DAddr begin, DAddr end) {
+            const auto& masks = pipeline->HandleConstantBuffers();
+            for (size_t stage = 0; stage < masks.size(); ++stage) {
+                for (u32 mask = masks[stage]; mask != 0; mask &= mask - 1) {
+                    const u32 slot = std::countr_zero(mask);
+                    const auto& cbuf = maxwell3d->state.shader_stages[stage].const_buffers[slot];
+                    if (!cbuf.enabled || cbuf.size == 0 || cbuf.address == 0) {
+                        continue;
+                    }
+                    const auto device = gpu_memory->GpuToCpuAddress(cbuf.address, cbuf.size);
+                    if (device && begin < *device + cbuf.size && *device < end) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        for (const auto [begin, end] : buffer_cache.PendingUploadWrites()) {
+            const u64 size = end - begin;
+            if (hits_handle(begin, end)) {
+                return false;
+            }
+            // Pages that hold an image. The filter is the same test the invalidation path
+            // uses before it locks the texture cache.
+            if (texture_cache.page_filter.Any(begin, size)) {
+                return false;
+            }
+        }
+        return true;
+    }();
     buffer_cache.BeginGraphicsUniforms(
         fast_draw_on && (path == DrawPath::Delta || keep_full) ? &taken_delta : nullptr);
     // fast_draw_sticky: a delta with nothing new to upload or bind records the draw only.

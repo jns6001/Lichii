@@ -1065,13 +1065,16 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
 
 void MemoryManager::FlushCaching() {
     // The copies already knew the device addresses. Translating the GPU addresses again was
-    // most of the per-draw invalidation.
-    if (!cached_device_writes.empty()) {
+    // most of the per-draw invalidation. Deferred inline-to-memory writes only reach the
+    // accumulator, so a recorded constant-buffer write must not discard them.
+    if (!cached_device_writes.empty() && !accumulated_untracked) {
         rasterizer->InnerInvalidation(cached_device_writes);
         cached_device_writes.clear();
-        accumulator.InvalidateAll([](GPUVAddr, size_t) {});
+        static_cast<void>(accumulator.InvalidateAll([](GPUVAddr, size_t) {}));
         return;
     }
+    cached_device_writes.clear();
+    accumulated_untracked = false;
     if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);
     })) {

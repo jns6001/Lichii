@@ -206,6 +206,8 @@ public:
     /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
     void AccumulateInvalidation(GPUVAddr gpu_addr, std::size_t size) {
         accumulator.Add(gpu_addr, size);
+        // No device address was recorded for this one: FlushCaching must translate.
+        accumulated_untracked = true;
     }
 
     const u8* GetSpan(const GPUVAddr src_addr, const std::size_t size) const;
@@ -316,6 +318,8 @@ private:
     /// Device addresses of WriteBlockCached, recorded while the bytes are copied so FlushCaching
     /// does not translate the GPU addresses again.
     bool record_cached_devices{};
+    /// The accumulator holds a range cached_device_writes does not (AccumulateInvalidation).
+    bool accumulated_untracked{};
     std::vector<std::pair<DAddr, size_t>> cached_device_writes;
     void NoteCachedDeviceWrite(DAddr addr, size_t size) {
         if (!cached_device_writes.empty()) {

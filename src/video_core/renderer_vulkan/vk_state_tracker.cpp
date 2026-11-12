@@ -220,9 +220,9 @@ void SetupDirtyVertexBindings(Maxwell3D::DirtyState::Tables& tables) {
         const u8 flag = static_cast<u8>(VertexBinding0 + i);
         tables[0][OFF(vertex_stream_instances) + i] = VertexInput;
         tables[1][OFF(vertex_stream_instances) + i] = flag;
-        // Stride and enable share the first word. Address words stay on VertexBuffers, so a new
-        // buffer does not rebuild the vertex-input layout.
-        tables[0][OFF(vertex_streams) + i * NUM(vertex_streams[0])] = VertexInput;
+        // Word 0 is stride and enable. It must keep the VertexBuffer0+i flag from the common
+        // tables: overwriting it with VertexInput dropped that flag, so a stride-only change
+        // never rebound the stream.
         tables[0][OFF(vertex_streams) + i * NUM(vertex_streams[0]) + divisor_offset] = VertexInput;
         tables[1][OFF(vertex_streams) + i * NUM(vertex_streams[0]) + divisor_offset] = flag;
     }
