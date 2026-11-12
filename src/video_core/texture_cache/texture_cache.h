@@ -1093,8 +1093,9 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         skip_clean = Settings::values.skip_clean_render_targets.GetValue();
     }
     if (!is_clear && skip_clean && !maxwell3d->dirty.flags[Dirty::RenderTargets] &&
-        (rt_skip_epoch == rt_content_epoch || !RenderTargetsNeedPrepare())) {
-        rt_skip_epoch = rt_content_epoch;
+        !RenderTargetsNeedPrepare()) {
+        // Checked every draw: a CPU write (CpuModified), a newer alias or a sparse state change
+        // reaches a target without a download, so an epoch of downloads alone misses them.
         ++VideoCommon::Nx2FastDraw::g_rt_clean_skips;
         // The draw still writes the targets: they must stay newer than any alias written since
         // (SynchronizeAliases and JoinImages order copies by modification tick) and stay
@@ -1335,7 +1336,6 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
             return;
         }
         image.flags &= ~ImageFlagBits::GpuModified;
-        ++rt_content_epoch;
         images.push_back(image_id);
     });
     if (images.empty()) {
@@ -4328,7 +4328,6 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
     Image& image = slot_images[image_id];
     if (invalidate) {
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
-        ++rt_content_epoch;
         if (False(image.flags & ImageFlagBits::Tracked)) {
             TrackImage(image, image_id);
         }

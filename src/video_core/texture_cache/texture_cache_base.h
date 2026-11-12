@@ -751,10 +751,6 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
-    /// Bumped when a render target can lose the GPU-modified mark (a download, an invalidate).
-    /// The clean-target skip walks images only when this changes.
-    u64 rt_content_epoch = 0;
-    u64 rt_skip_epoch = ~u64{0};
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};
