@@ -548,6 +548,15 @@ public:
         return uniform_keep.writes_complete;
     }
 
+    /// Whether the delta since the previous draw bound constant buffer `index` of `stage` (a
+    /// new address or the same one). True when the delta is unknown.
+    [[nodiscard]] bool UniformSlotRebound(size_t stage, u32 index) const noexcept {
+        if (!uniform_keep.writes_complete || stage >= NUM_STAGES || index >= 32) {
+            return true;
+        }
+        return ((uniform_keep.delta_binds[stage] >> index) & 1) != 0;
+    }
+
     /// Whether [begin, end) misses every recorded uniform write. False when the list is incomplete.
     [[nodiscard]] bool RangeMissesUniformWrites(DAddr begin, DAddr end) const noexcept {
         if (!uniform_keep.writes_complete || begin >= end) {
@@ -852,6 +861,7 @@ private:
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
         std::array<u32, NUM_STAGES> prev_streamed{}; ///< Streamed by the previous draw
+        std::array<u32, NUM_STAGES> delta_binds{};   ///< Slots the delta bound (writes_complete)
         /// Device ranges written since the previous draw began: inline constant data, then the
         /// CPU writes and GPU-modified marks.
         boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>

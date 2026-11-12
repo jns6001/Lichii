@@ -1719,6 +1719,7 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     }
     keep.writes_complete = true;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        keep.delta_binds[stage] = delta->binds[stage];
         keep.candidates[stage] = streamed[stage] & ~delta->binds[stage];
     }
 }

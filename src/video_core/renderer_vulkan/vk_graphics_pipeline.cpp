@@ -1205,11 +1205,15 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
                     any_storage = true;
                     DAddr begin{};
                     u32 span{};
+                    // StorageBufferBinding reads the address and the size word after it. A
+                    // constant buffer bound again (another address) holds other pointers.
+                    constexpr u32 pointer_bytes = 2 * sizeof(u64);
                     if (desc.count != 1 || desc.indirect_offset != ~0U ||
+                        buffer_cache.UniformSlotRebound(stage, desc.cbuf_index) ||
                         !buffer_cache.UniformDeviceSpan(stage, desc.cbuf_index, begin, span) ||
-                        u64{desc.cbuf_offset} + sizeof(u64) > span ||
+                        u64{desc.cbuf_offset} + pointer_bytes > span ||
                         !buffer_cache.RangeMissesUniformWrites(
-                            begin + desc.cbuf_offset, begin + desc.cbuf_offset + sizeof(u64))) {
+                            begin + desc.cbuf_offset, begin + desc.cbuf_offset + pointer_bytes)) {
                         pointers_stable = false;
                         break;
                     }
