@@ -221,7 +221,14 @@ inline u64 g_storage_reused{};
 /// Payload fence releases written when the back reaches them, and those still held for the host
 /// GPU. The fencing decision is on the GPU thread; the fast-draw report reads these.
 inline std::atomic<u64> g_payload_early{};
-inline std::atomic<u64> g_payload_held{};
+/// Early writes that still left buffer downloads on the host fence (reactive flushing covers reads).
+inline std::atomic<u64> g_payload_early_buffer{};
+inline std::atomic<u64> g_payload_held_accuracy{};
+inline std::atomic<u64> g_payload_held_buffer{};
+inline std::atomic<u64> g_payload_held_texture{};
+inline std::atomic<u64> g_payload_held_query{};
+inline std::atomic<u64> g_payload_held_earlier{};
+inline std::atomic<u64> g_payload_held_queued{};
 /// FlushCaching calls with an empty accumulator, and calls that translated ranges.
 inline std::atomic<u64> g_inval_empty{};
 inline std::atomic<u64> g_inval_ran{};

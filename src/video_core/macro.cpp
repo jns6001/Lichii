@@ -49,6 +49,8 @@ using Maxwell3D = Engines::Maxwell3D;
 
 namespace {
 
+bool SameShaderKept();
+
 bool IsTopologySafe(Maxwell3D::Regs::PrimitiveTopology topology) {
     switch (topology) {
     case Maxwell3D::Regs::PrimitiveTopology::Points:
@@ -332,6 +334,11 @@ void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d
     const u32 index = parameters[0];
     if ((parameters[1] - regs.shadow_scratch[28 + index]) == 0) {
         return;
+    }
+    // The blanket break was skipped (fast_draw_same_shader). The program id changed: end the
+    // chain before the pipeline and the constant-buffer bind below.
+    if (SameShaderKept()) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
 
     regs.pipelines[index & 0xF].offset = parameters[2];
@@ -1392,6 +1399,15 @@ bool ConstMacrosKept() {
     return on;
 }
 
+bool SameShaderKept() {
+    static u32 sample{};
+    static bool on{};
+    if ((sample++ & 31) == 0) {
+        on = Settings::values.fast_draw_same_shader.GetValue();
+    }
+    return on;
+}
+
 const char* MacroKind(const AnyCachedMacro& program) {
     if (std::holds_alternative<HLE_C713C83D8F63CCF3>(program)) {
         return "const-selector";
@@ -1440,7 +1456,8 @@ const char* MacroKind(const AnyCachedMacro& program) {
 
 void NoteBreakingMacro(u32 method, const AnyCachedMacro& program, bool keep) {
     const bool selector = IsConstSelectorHle(program);
-    if (keep && !selector) {
+    const bool shader = std::holds_alternative<HLE_BindShader>(program);
+    if (keep && !selector && !shader) {
         return;
     }
     VideoCommon::Nx2FastDraw::NoteMacro(method, MacroKind(program), keep);
@@ -1734,7 +1751,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
         const bool keep = FastDrawReuseKeepsMacro(it->second.program) ||
                           DrawOnlyHleSkipsBreak(it->second.program) ||
-                          (ConstMacrosKept() && IsConstSelectorHle(it->second.program));
+                          (ConstMacrosKept() && IsConstSelectorHle(it->second.program)) ||
+                          (SameShaderKept() &&
+                           std::holds_alternative<HLE_BindShader>(it->second.program));
         NoteBreakingMacro(method, it->second.program, keep);
         if (!keep) {
             FastDraw::Break(FastDraw::Reason::Method, method);
@@ -1784,7 +1803,8 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     }
 
     const bool keep = FastDrawReuseKeepsMacro(ci.program) || DrawOnlyHleSkipsBreak(ci.program) ||
-                      (ConstMacrosKept() && IsConstSelectorHle(ci.program));
+                      (ConstMacrosKept() && IsConstSelectorHle(ci.program)) ||
+                      (SameShaderKept() && std::holds_alternative<HLE_BindShader>(ci.program));
     NoteBreakingMacro(method, ci.program, keep);
     if (!keep) {
         FastDraw::Break(FastDraw::Reason::Method, method);

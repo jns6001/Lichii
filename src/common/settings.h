@@ -786,6 +786,13 @@ struct Values {
     SwitchableSetting<bool> fast_draw_const_macros{linkage, false, "fast_draw_const_macros",
                                                    Category::RendererAdvanced};
 
+    // HLE_BindShader compares the program id with the shadow scratch and returns when it
+    // matches, but the call still ended the fast-draw chain. On: an unchanged bind does not.
+    // A bind that changes the program still breaks before it writes the pipeline or the
+    // constant buffer. Off by default.
+    SwitchableSetting<bool> fast_draw_same_shader{linkage, false, "fast_draw_same_shader",
+                                                  Category::RendererAdvanced};
+
     // A draw that rewrites part of a small uniform still copied the whole guest range into a
     // new stream allocation. On: copy the previous upload and read only the bytes this draw's
     // recorded constant-buffer writes overlap. A write the list does not hold still copies

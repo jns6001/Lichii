@@ -436,6 +436,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "records only the draw call. Setup is not run again.\n"
               "Off by default. Needs \"Reuse unchanged draw state\". Skips the draw when a "
               "texture upload, a feedback barrier or a state flag is pending."));
+    INSERT(Settings, fast_draw_same_shader, tr("Keep unchanged shader binds"),
+           tr("A shader bind that selects the program already bound does not end fast-draw "
+              "reuse.\n"
+              "A bind that changes the program still does. Off by default."));
     INSERT(Settings, fast_draw_const_macros, tr("Keep constant-buffer macros"),
            tr("Breath of the Wild's constant-buffer selector macros were ending fast-draw "
               "reuse even though they only write the selector registers.\n"

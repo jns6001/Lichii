@@ -740,7 +740,13 @@ void RasterizerVulkan::ReportFastDraws() {
         return static_cast<double>(counter.exchange(0, std::memory_order_relaxed)) / 1.0;
     };
     const double payload_early = take(VideoCommon::Nx2FastDraw::g_payload_early);
-    const double payload_held = take(VideoCommon::Nx2FastDraw::g_payload_held);
+    const double payload_early_buffer = take(VideoCommon::Nx2FastDraw::g_payload_early_buffer);
+    const double payload_accuracy = take(VideoCommon::Nx2FastDraw::g_payload_held_accuracy);
+    const double payload_buffer = take(VideoCommon::Nx2FastDraw::g_payload_held_buffer);
+    const double payload_texture = take(VideoCommon::Nx2FastDraw::g_payload_held_texture);
+    const double payload_query = take(VideoCommon::Nx2FastDraw::g_payload_held_query);
+    const double payload_earlier = take(VideoCommon::Nx2FastDraw::g_payload_held_earlier);
+    const double payload_queued = take(VideoCommon::Nx2FastDraw::g_payload_held_queued);
     const double inval_empty = take(VideoCommon::Nx2FastDraw::g_inval_empty);
     const double inval_ran = take(VideoCommon::Nx2FastDraw::g_inval_ran);
     const double protect_skipped = take(VideoCommon::Nx2FastDraw::g_protect_skipped);
@@ -755,9 +761,13 @@ void RasterizerVulkan::ReportFastDraws() {
              static_cast<double>(VideoCommon::Nx2FastDraw::g_rt_clean_skips) / seconds,
              static_cast<double>(VideoCommon::Nx2FastDraw::g_storage_reused) / seconds);
     LOG_INFO(Render_Vulkan,
-             "Payload releases per second: {:.0f} early, {:.0f} held | invalidation {:.0f} ran, "
-             "{:.0f} empty | page protection {:.0f} changed, {:.0f} skipped",
-             payload_early / seconds, payload_held / seconds, inval_ran / seconds,
+             "Payload releases per second: {:.0f} early ({:.0f} with buffer downloads still "
+             "queued), held accuracy {:.0f}, buffer {:.0f}, texture {:.0f}, query {:.0f}, "
+             "earlier fence {:.0f}, queued ops {:.0f} | invalidation {:.0f} ran, {:.0f} empty | "
+             "page protection {:.0f} changed, {:.0f} skipped",
+             payload_early / seconds, payload_early_buffer / seconds, payload_accuracy / seconds,
+             payload_buffer / seconds, payload_texture / seconds, payload_query / seconds,
+             payload_earlier / seconds, payload_queued / seconds, inval_ran / seconds,
              inval_empty / seconds, protect_ran / seconds, protect_skipped / seconds);
     VideoCommon::Nx2FastDraw::g_macro_notes = {};
     VideoCommon::Nx2FastDraw::g_macro_note_overflow = 0;
