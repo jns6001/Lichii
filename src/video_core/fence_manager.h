@@ -112,13 +112,12 @@ public:
                 std::scoped_lock lock{uncommitted_guard};
                 queued = !uncommitted_operations.empty();
             }
-            // Buffer copies stay on the host fence. With reactive flushing a CPU read of a page
-            // the GPU still owns faults and flushes, so publishing the payload first does not
-            // hand the guest stale buffer bytes. Texture readbacks and query results do not
-            // take that fault, and neither does a read when reactive flushing is off.
-            const bool reactive = Settings::ReactiveFlushing();
-            const bool hold = accuracy_delay || texture || query || earlier || queued ||
-                              (buffer && !reactive);
+            // Buffer copies committed at a fence are the ones no CPU read flushes: with "Download
+            // GPU buffers at fences" GetFlushArea does not ask the buffer cache at all
+            // (FlushesOnCpuRead), and without it only Preflushable ranges are copied at fences,
+            // and a read of those skips the flush too. The guest finds the bytes in memory only
+            // once the fence is released, so the payload waits for it, reactive flushing or not.
+            const bool hold = accuracy_delay || texture || buffer || query || earlier || queued;
             auto add = [](std::atomic<u64>& counter) {
                 counter.fetch_add(1, std::memory_order_relaxed);
             };
@@ -172,13 +171,11 @@ public:
             if (delay_fence) {
                 uncommitted_operations.emplace_back(std::move(func));
             }
-            // Buffer-only downloads do not order a later payload when reactive flushing is on
-            // (a CPU read faults). Texture readbacks, query results and delayed operations do.
-            // The bit is stored with the fence so the release counts the same fences.
-            const bool ordering = (committed_flushes & TextureFlushes) != 0 || query_flushes ||
-                                  !uncommitted_operations.empty() ||
-                                  ((committed_flushes & BufferFlushes) != 0 &&
-                                   !Settings::ReactiveFlushing());
+            // Downloads (buffer ones included, see above), query results and delayed operations
+            // order a later payload. The bit is stored with the fence so the release counts the
+            // same fences.
+            const bool ordering = committed_flushes != 0 || query_flushes ||
+                                  !uncommitted_operations.empty();
             u8 flush_bits = static_cast<u8>(committed_flushes | (query_flushes ? QueryFlushes : 0));
             if (ordering) {
                 flush_bits |= CountsAsWork;
@@ -423,8 +420,7 @@ private:
     /// This fence orders a later payload (not a buffer-only download under reactive flushing).
     static constexpr u8 CountsAsWork = 8;
 
-    /// A fence made before now still has texture readback, query results or delayed operations
-    /// to run. Buffer-only downloads are not counted while reactive flushing is on.
+    /// A fence made before now still has downloads, query results or delayed operations to run.
     bool EarlierFenceWorkPending() const {
         return work_fences_queued.load(std::memory_order_acquire) !=
                work_fences_done.load(std::memory_order_acquire);
