@@ -335,11 +335,11 @@ void HLE_BindShader::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d
     if ((parameters[1] - regs.shadow_scratch[28 + index]) == 0) {
         return;
     }
-    // The blanket break was skipped (fast_draw_same_shader). The program id changed: end the
-    // chain before the pipeline and the constant-buffer bind below.
-    if (SameShaderKept()) {
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
-    }
+    // The blanket break may have been skipped (fast_draw_same_shader). The program id changed:
+    // end the chain before the pipeline and the constant-buffer bind below. Unconditional: the
+    // setting is sampled separately here and in MacroEngine::Execute, so the two can disagree
+    // on the call that picks up a change, and a second break is only a serial increment.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
 
     regs.pipelines[index & 0xF].offset = parameters[2];
     maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
