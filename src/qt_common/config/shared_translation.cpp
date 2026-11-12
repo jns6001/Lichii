@@ -424,6 +424,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "reuse under those same numbers.\n"
               "On: neither forces a full setup. A draw whose vertex buffers also stayed put, "
               "and whose buffers the CPU did not write, replays the previous descriptors."));
+    INSERT(Settings, fast_draw_sticky, tr("Record unchanged draws only"),
+           tr("A draw whose pipeline, buffers, images and dynamic state match the previous one "
+              "records only the draw call. Setup is not run again.\n"
+              "Off by default. Needs \"Reuse unchanged draw state\". Skips the draw when a "
+              "texture upload, a feedback barrier or a state flag is pending."));
     INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
            tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
               "inline writes and tracked memory writes did not touch that range.\n"

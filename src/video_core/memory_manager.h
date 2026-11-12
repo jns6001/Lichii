@@ -197,6 +197,11 @@ public:
 
     void FlushCaching();
 
+    /// FlushCaching would invalidate at least one range.
+    [[nodiscard]] bool InvalidationPending() const noexcept {
+        return accumulator.Pending();
+    }
+
     /// Leaves the caches' invalidation of a range already written for the next FlushCaching
     /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
     void AccumulateInvalidation(GPUVAddr gpu_addr, std::size_t size) {

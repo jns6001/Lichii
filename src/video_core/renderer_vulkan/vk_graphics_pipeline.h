@@ -360,6 +360,14 @@ public:
     /// ConfigureDelta prepares none, Configure does.
     [[nodiscard]] bool DeltaImagesChange() const noexcept;
 
+    /// Views the previous draw kept. Empty until a draw captured them.
+    [[nodiscard]] const std::vector<VideoCommon::ImageViewInOut>& DeltaViews() const noexcept {
+        return delta_views;
+    }
+
+    /// Image descriptors and rescaling words from the previous draw are still the right ones.
+    [[nodiscard]] bool StickyImagesReady() const noexcept;
+
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
         return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };

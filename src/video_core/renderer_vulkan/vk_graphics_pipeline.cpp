@@ -1162,6 +1162,11 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
+bool GraphicsPipeline::StickyImagesReady() const noexcept {
+    return kept_images_valid && delta_views_valid &&
+           kept_scale_epoch == texture_cache.ScaleEpoch() && !DeltaImagesChange();
+}
+
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture

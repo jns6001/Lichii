@@ -764,6 +764,13 @@ struct Values {
     SwitchableSetting<bool> fast_draw_neutral_regs{linkage, false, "fast_draw_neutral_regs",
                                                    Category::RendererAdvanced};
 
+    // A fast-draw delta whose constant buffers, vertex buffers, images and dynamic state did
+    // not change still walked configure, uniform binds, render targets and dynamic state
+    // (~0.9 µs, almost a full draw). On: that draw records only the draw call. Vulkan pipeline,
+    // descriptor, vertex and dynamic state stick for the render pass. Off by default.
+    SwitchableSetting<bool> fast_draw_sticky{linkage, false, "fast_draw_sticky",
+                                             Category::RendererAdvanced};
+
     // Uniform keeps otherwise run only on a fast-draw delta. On: a full draw also reuses the
     // previous upload when this draw's inline writes and tracked memory writes missed that
     // range. A store the buffer cache was not told about (an untracked CPU write) is missed.
