@@ -394,6 +394,9 @@ private:
         u64 map_serial{};
         u64 tick{};
         u64 render_pass{};
+        /// XOR of the HLE attribute-replacement table at record time. Empty and a draw that
+        /// swaps base-vertex for draw-id do not share a pipeline.
+        u64 replacements{};
         Maxwell::PrimitiveTopology topology{};
         bool is_indexed{};
     };

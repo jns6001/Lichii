@@ -420,9 +420,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "method write."));
     INSERT(Settings, fast_draw_neutral_regs, tr("Ignore per-draw padding writes"),
            tr("Breath of the Wild writes SET_VERTEX_ID_BASE and unused transform-feedback "
-              "words before almost every draw. Those do not change textures or buffers.\n"
-              "On: they no longer force a full draw setup. A draw whose vertex buffers also "
-              "stayed put replays the previous image descriptors."));
+              "words before almost every draw, and its draw macros were ending fast-draw "
+              "reuse under those same numbers.\n"
+              "On: neither forces a full setup. A draw whose vertex buffers also stayed put, "
+              "and whose buffers the CPU did not write, replays the previous descriptors."));
     INSERT(Settings, uniform_keep_full_draws, tr("Keep uniforms on full draws"),
            tr("Reuses a uniform buffer upload on draws that are not fast-draw deltas, when "
               "inline writes and tracked memory writes did not touch that range.\n"

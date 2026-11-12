@@ -466,6 +466,19 @@ RasterizerVulkan::~RasterizerVulkan() {
     scheduler.Finish();
 }
 
+namespace {
+
+/// Order-independent signature of the HLE attribute replacements in force for this draw.
+u64 ReplacementHash(const Tegra::Engines::Maxwell3D& maxwell3d) {
+    u64 hash = maxwell3d.replace_table.size();
+    for (const auto& [key, value] : maxwell3d.replace_table) {
+        hash ^= key + (static_cast<u64>(static_cast<u32>(value)) << 48);
+    }
+    return hash;
+}
+
+} // namespace
+
 GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_indirect) {
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     const ReusableDraw draw = std::exchange(reusable_draw, ReusableDraw{});
@@ -483,6 +496,9 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
         draw.topology != draw_state.topology || !draw_state.inline_index_draw_indexes.empty() ||
         frame_dump.Capturing()) {
         return full(FullDraw::Kind);
+    }
+    if (draw.replacements != ReplacementHash(*maxwell3d)) {
+        return full(FullDraw::StateChanged);
     }
     if (draw.serial != FastDraw::Serial()) {
         const u32 last_break = FastDraw::g_last_break.load(std::memory_order_relaxed);
@@ -599,6 +615,7 @@ void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_inde
         .map_serial = map_serial,
         .tick = scheduler.CurrentTick(),
         .render_pass = scheduler.RenderPassSerial(),
+        .replacements = ReplacementHash(*maxwell3d),
         .topology = topology,
         .is_indexed = is_indexed,
     };
@@ -1066,6 +1083,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     // Full draws still collected inline constant writes into taken_delta (TakeReusableDraw
     // always swaps it). uniform_keep_full_draws uses those to drop unchanged slots.
     const bool keep_full = Settings::values.uniform_keep_full_draws.GetValue();
+    // Read before BeginGraphicsUniforms clears the write list.
+    const bool cache_quiet = buffer_cache.DrawUploadsQuiet();
     buffer_cache.BeginGraphicsUniforms(
         fast_draw_on && (path == DrawPath::Delta || keep_full) ? &taken_delta : nullptr);
     if (path == DrawPath::Delta) {
@@ -1081,8 +1100,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             }
         }
         // Empty delta: no constant-buffer writes or rebinds since the previous draw.
+        // CPU writes and buffer deletions do not bump the fast-draw serial.
         const bool neutral_only = Settings::values.fast_draw_neutral_regs.GetValue() &&
-                                  taken_delta.Empty() && !geometry_dirty;
+                                  taken_delta.Empty() && !geometry_dirty && cache_quiet;
         if (Profile::Scope scope{Profile::Zone::Configure};
             !pipeline->ConfigureDelta(is_indexed, neutral_only)) {
             report_failure("configure failed");

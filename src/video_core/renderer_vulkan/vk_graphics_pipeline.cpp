@@ -1196,13 +1196,11 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed, bool neutral_only) {
             }
         }
     }
-    {
+    if (!neutral_only) {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        // UpdateGraphicsBuffers resolves addresses and uploads. Neutral draws did not dirty
-        // those bindings; binding the host buffers again keeps the command buffer's vertex state.
-        if (!neutral_only) {
-            buffer_cache.UpdateGraphicsBuffers(is_indexed);
-        }
+        // Vertex state sticks for the rest of this render pass. A neutral draw did not dirty
+        // it and the buffer cache saw no write, so the binds the previous draw recorded stand.
+        buffer_cache.UpdateGraphicsBuffers(is_indexed);
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
     {

@@ -374,10 +374,10 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         area->preemtive = false;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
-    // instead keep read traps and flush on demand. gpu_buffer_fence_downloads off is that path
-    // for Switch 1 as well: AsyncBufferDownloads() is false, so the first read does not mark
-    // the page and the ~60k copies/s of already-read pages stop.
-    const bool preflush = AsyncBufferDownloads();
+    // instead keep read traps and flush on demand. The same for Switch 1 when fence downloads
+    // are off: the first read flushes on demand and does not mark the page.
+    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+                          Settings::values.gpu_buffer_fence_downloads.GetValue();
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
@@ -1693,7 +1693,7 @@ void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     keep.candidates = {};
     keep.writes.clear();
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
-    const bool usable = delta != nullptr && unwritten;
+    const bool usable = delta != nullptr && unwritten && !delta->overflowed;
     if (usable) {
         keep.writes.insert(keep.writes.end(), keep.memory_writes.begin(),
                            keep.memory_writes.end());

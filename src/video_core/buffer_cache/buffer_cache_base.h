@@ -535,6 +535,12 @@ public:
     /// buffer binds and data since the previous draw when it is a fast draw delta draw, else
     /// nullptr.
     void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
+    /// No buffer-cache write or buffer deletion since the previous draw. CPU writes do not
+    /// bump the fast-draw serial, so a neutral delta has to ask.
+    [[nodiscard]] bool DrawUploadsQuiet() const noexcept {
+        return !uniform_keep.memory_writes_lost && uniform_keep.memory_writes.empty() &&
+               uniform_keep.draw_deletions == buffer_deletions;
+    }
 
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;

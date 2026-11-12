@@ -355,10 +355,18 @@ bool Maxwell3D::IsFastDrawNeutral(u32 method) {
         return true;
     }
     // Transform-feedback padding between the buffer array (ends at 0x400) and the controls
-    // (0x700). BotW writes 0x183 and 0x1a2 here on almost every draw.
+    // (0x700). 0x183 and 0x1a2 are in this hole. 0xfe is the unused word at +0x18 inside
+    // buffer 3 (three padding words after start_offset in each 0x20-byte buffer).
     constexpr u32 padding_begin = 0x400 / sizeof(u32);
     constexpr u32 padding_end = 0x700 / sizeof(u32);
-    return method >= padding_begin && method < padding_end;
+    if (method >= padding_begin && method < padding_end) {
+        return true;
+    }
+    constexpr u32 buffers = 0x380 / sizeof(u32);
+    if (method >= buffers && method < padding_begin) {
+        return (method - buffers) % 8 >= 5;
+    }
+    return false;
 }
 
 bool Maxwell3D::IsFastDrawParameter(u32 method) {
@@ -413,7 +421,8 @@ bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
-    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method)) {
+    if (!DrawManager::IsInstanceLoopMethod(method) && !IsFastDrawDeltaMethod(method) &&
+        !IsFastDrawNeutral(method)) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
@@ -1037,6 +1046,8 @@ void Maxwell3D::NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end) {
                           1) *
                          HeaderSize;
     if ((begin < tic + tic_size && tic < end) || (begin < tsc + tsc_size && tsc < end)) {
+        // Returned before the range was noted. A later keep must not treat it as unwritten.
+        FastDraw::g_delta.overflowed = true;
         FastDraw::Break(FastDraw::Reason::TextureHeaders);
         return;
     }
@@ -1051,6 +1062,7 @@ void Maxwell3D::NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end) {
             const DAddr device_end = *device + (page_end - page);
             if (fast_draw_header_spans.Intersects(*device, device_end) ||
                 fast_draw_sampler_spans.Intersects(*device, device_end)) {
+                FastDraw::g_delta.overflowed = true;
                 FastDraw::Break(FastDraw::Reason::TextureHeaders);
                 return;
             }
